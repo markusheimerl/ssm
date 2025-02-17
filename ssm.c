@@ -13,8 +13,9 @@ int main() {
     const int input_dim = 16;
     const int state_dim = 512;
     const int output_dim = 4;
-    const int num_samples = 1024;
-    const int batch_size = num_samples;
+    const int num_samples = 1024; // 32 * 32 samples
+    const int seq_length = 32;  // Process sequences of 32 steps
+    const int batch_size = 32;  // Process batches of 32 samples
     
     // Generate synthetic data
     float *X, *y;
@@ -24,30 +25,62 @@ int main() {
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, batch_size);
     
     // Training parameters
-    const int num_epochs = 10000;
+    const int num_epochs = 1000;
     const float learning_rate = 0.001f;
+    
+    // Allocate memory for batch data
+    float* batch_X = (float*)malloc(batch_size * input_dim * sizeof(float));
+    float* batch_y = (float*)malloc(batch_size * output_dim * sizeof(float));
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
-        // Reset state at the beginning of each epoch
-        memset(ssm->state, 0, ssm->batch_size * ssm->state_dim * sizeof(float));
+        float epoch_loss = 0.0f;
+        int num_batches = 0;
         
-        // Forward pass
-        forward_pass(ssm, X);
-        
-        // Calculate loss
-        float loss = calculate_loss(ssm, y);
-        
-        // Backward pass
-        zero_gradients(ssm);
-        backward_pass(ssm, X);
-        
-        // Update weights
-        update_weights(ssm, learning_rate);
+        // Process data in sequences
+        for (int seq_start = 0; seq_start <= num_samples - seq_length; seq_start += seq_length) {
+            // Reset state at the beginning of each sequence
+            memset(ssm->state, 0, ssm->batch_size * ssm->state_dim * sizeof(float));
+            
+            // Process sequence in batches
+            for (int step = 0; step < seq_length; step += batch_size) {
+                int current_batch_size = batch_size;
+                if (seq_start + step + batch_size > num_samples) {
+                    current_batch_size = num_samples - (seq_start + step);
+                }
+                
+                // Prepare batch data
+                for (int b = 0; b < current_batch_size; b++) {
+                    int sample_idx = seq_start + step + b;
+                    memcpy(&batch_X[b * input_dim], 
+                           &X[sample_idx * input_dim], 
+                           input_dim * sizeof(float));
+                    memcpy(&batch_y[b * output_dim], 
+                           &y[sample_idx * output_dim], 
+                           output_dim * sizeof(float));
+                }
+                
+                // Forward pass
+                forward_pass(ssm, batch_X);
+                
+                // Calculate loss
+                float loss = calculate_loss(ssm, batch_y);
+                epoch_loss += loss;
+                num_batches++;
+                
+                // Backward pass
+                zero_gradients(ssm);
+                backward_pass(ssm, batch_X);
+                
+                // Update weights
+                update_weights(ssm, learning_rate);
+            }
+        }
         
         // Print progress
         if ((epoch + 1) % 100 == 0) {
-            printf("Epoch [%d/%d], Loss: %.8f\n", epoch + 1, num_epochs, loss);
+            printf("Epoch [%d/%d], Average Loss: %.8f\n", 
+                   epoch + 1, num_epochs, epoch_loss / num_batches);
         }
     }
 
@@ -69,106 +102,137 @@ int main() {
     // Load the model back
     SSM* loaded_ssm = load_model(model_fname);
     
-    // Reset state
-    memset(loaded_ssm->state, 0, loaded_ssm->batch_size * loaded_ssm->state_dim * sizeof(float));
+    float* all_predictions = (float*)malloc(num_samples * output_dim * sizeof(float));
     
-    // Forward pass with loaded model
-    forward_pass(loaded_ssm, X);
-    
-    // Calculate and print loss with loaded model
-    float verification_loss = calculate_loss(loaded_ssm, y);
-    printf("Loss with loaded model: %.8f\n", verification_loss);
-
-    printf("\nEvaluating model performance...\n");
-
-    // Calculate R² scores
-    printf("\nR² scores:\n");
-    for (int i = 0; i < output_dim; i++) {
-        float y_mean = 0.0f;
-        for (int j = 0; j < num_samples; j++) {
-            y_mean += y[j * output_dim + i];
-        }
-        y_mean /= num_samples;
-
-        float ss_res = 0.0f;
-        float ss_tot = 0.0f;
-        for (int j = 0; j < num_samples; j++) {
-            float diff_res = y[j * output_dim + i] - loaded_ssm->predictions[j * output_dim + i];
-            float diff_tot = y[j * output_dim + i] - y_mean;
-            ss_res += diff_res * diff_res;
-            ss_tot += diff_tot * diff_tot;
-        }
-        float r2 = 1.0f - (ss_res / ss_tot);
-        printf("R² score for output y%d: %.8f\n", i, r2);
-    }
-
-    // Print sample predictions
-    printf("\nSample Predictions (first 15 samples):\n");
-    printf("Output\t\tPredicted\tActual\t\tDifference\n");
-    printf("------------------------------------------------------------\n");
-
-    for (int i = 0; i < output_dim; i++) {
-        printf("\ny%d:\n", i);
-        for (int j = 0; j < 15; j++) {
-            float pred = loaded_ssm->predictions[j * output_dim + i];
-            float actual = y[j * output_dim + i];
-            float diff = pred - actual;
-            printf("Sample %d:\t%8.3f\t%8.3f\t%8.3f\n", j, pred, actual, diff);
+    // Generate all predictions
+    for (int seq_start = 0; seq_start < num_samples; seq_start += batch_size) {
+        int current_batch_size = batch_size;
+        if (seq_start + batch_size > num_samples) {
+            current_batch_size = num_samples - seq_start;
         }
         
-        // Calculate MAE for this output
-        float mae = 0.0f;
-        for (int j = 0; j < num_samples; j++) {
-            mae += fabs(loaded_ssm->predictions[j * output_dim + i] - y[j * output_dim + i]);
+        // Prepare batch data
+        for (int b = 0; b < current_batch_size; b++) {
+            memcpy(&batch_X[b * input_dim], 
+                   &X[(seq_start + b) * input_dim], 
+                   input_dim * sizeof(float));
         }
-        mae /= num_samples;
-        printf("Mean Absolute Error for y%d: %.3f\n", i, mae);
+        
+        // Forward pass
+        forward_pass(loaded_ssm, batch_X);
+        
+        // Store predictions
+        for (int b = 0; b < current_batch_size; b++) {
+            memcpy(&all_predictions[(seq_start + b) * output_dim],
+                   &loaded_ssm->predictions[b * output_dim],
+                   output_dim * sizeof(float));
+        }
     }
-
-    // Additional analysis: System stability check
-    printf("\nSystem Stability Analysis:\n");
     
-    // Compute the spectral radius of A (maximum absolute eigenvalue)
-    // Using a simple power iteration method
+    printf("\nStatistics per output dimension:\n");
+    printf("----------------------------------\n");
+    
+    double total_mse = 0.0;
+    
+    for (int dim = 0; dim < output_dim; dim++) {
+        printf("\nDimension %d:\n", dim);
+        
+        // Calculate simple error statistics first
+        double sum_sq_error = 0.0;
+        double sum_abs_error = 0.0;
+        double sum_actual = 0.0;
+        double sum_pred = 0.0;
+        
+        for (int i = 0; i < num_samples; i++) {
+            double pred = (double)all_predictions[i * output_dim + dim];
+            double actual = (double)y[i * output_dim + dim];
+            double error = pred - actual;
+            
+            if (!isnan(pred) && !isnan(actual)) {  // Add validity check
+                sum_sq_error += error * error;
+                sum_abs_error += fabs(error);
+                sum_actual += actual;
+                sum_pred += pred;
+            }
+        }
+        
+        double mse = sum_sq_error / num_samples;
+        double mae = sum_abs_error / num_samples;
+        double mean_actual = sum_actual / num_samples;
+        double mean_pred = sum_pred / num_samples;
+        
+        printf("MSE: %.6f\n", mse);
+        printf("MAE: %.6f\n", mae);
+        printf("Mean actual: %.6f\n", mean_actual);
+        printf("Mean predicted: %.6f\n", mean_pred);
+        
+        // Calculate R² with extra care
+        double ss_tot = 0.0;
+        double ss_res = sum_sq_error;  // We already have this
+        
+        for (int i = 0; i < num_samples; i++) {
+            double actual = (double)y[i * output_dim + dim];
+            if (!isnan(actual)) {  // Add validity check
+                double diff_from_mean = actual - mean_actual;
+                ss_tot += diff_from_mean * diff_from_mean;
+            }
+        }
+        
+        double r2 = (ss_tot > 1e-10) ? (1.0 - ss_res / ss_tot) : 0.0;
+        printf("R²: %.6f\n", r2);
+        
+        total_mse += mse;
+        
+        // Print first 15 samples
+        printf("\nFirst 15 samples:\n");
+        printf("Predicted\tActual\t\tError\n");
+        printf("----------------------------------------\n");
+        for (int i = 0; i < 15 && i < num_samples; i++) {
+            float pred = all_predictions[i * output_dim + dim];
+            float actual = y[i * output_dim + dim];
+            float error = pred - actual;
+            if (!isnan(pred) && !isnan(actual)) {
+                printf("%8.3f\t%8.3f\t%8.3f\n", pred, actual, error);
+            }
+        }
+        printf("\n");
+    }
+    
+    printf("\nOverall MSE: %.6f\n", total_mse / output_dim);
+
+    // System stability analysis
+    printf("\nSystem Stability Analysis:\n");
     float* v = (float*)malloc(state_dim * sizeof(float));
     float* Av = (float*)malloc(state_dim * sizeof(float));
     
-    // Initialize random vector
     for (int i = 0; i < state_dim; i++) {
-        v[i] = ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
+        v[i] = ((float)rand() / (float)RAND_MAX) * 2.0f - 1.0f;
     }
     
-    // Normalize
     float norm = 0.0f;
     for (int i = 0; i < state_dim; i++) {
         norm += v[i] * v[i];
     }
-    norm = sqrt(norm);
+    norm = sqrtf(norm);  // Use sqrtf for float
     for (int i = 0; i < state_dim; i++) {
         v[i] /= norm;
     }
     
-    // Power iteration (20 iterations)
     float spectral_radius = 0.0f;
     for (int iter = 0; iter < 20; iter++) {
-        // Compute Av
         cblas_sgemv(CblasRowMajor, CblasNoTrans,
                     state_dim, state_dim,
                     1.0f, loaded_ssm->A, state_dim,
                     v, 1,
                     0.0f, Av, 1);
         
-        // Compute new norm
         norm = 0.0f;
         for (int i = 0; i < state_dim; i++) {
             norm += Av[i] * Av[i];
         }
-        norm = sqrt(norm);
-        
-        // Update spectral radius estimate
+        norm = sqrtf(norm);
         spectral_radius = norm;
         
-        // Normalize
         for (int i = 0; i < state_dim; i++) {
             v[i] = Av[i] / norm;
         }
@@ -195,12 +259,15 @@ int main() {
     }
     
     printf("\nFrobenius norms of matrices:\n");
-    printf("||A|| = %.6f\n", sqrt(norm_A));
-    printf("||B|| = %.6f\n", sqrt(norm_B));
-    printf("||C|| = %.6f\n", sqrt(norm_C));
-    printf("||D|| = %.6f\n", sqrt(norm_D));
+    printf("||A|| = %.6f\n", sqrtf(norm_A));
+    printf("||B|| = %.6f\n", sqrtf(norm_B));
+    printf("||C|| = %.6f\n", sqrtf(norm_C));
+    printf("||D|| = %.6f\n", sqrtf(norm_D));
     
     // Cleanup
+    free(batch_X);
+    free(batch_y);
+    free(all_predictions);
     free(v);
     free(Av);
     free(X);
