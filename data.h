@@ -9,72 +9,114 @@
 #define MAX_SYNTHETIC_OUTPUTS 4
 #define INPUT_RANGE_MIN -3.0f
 #define INPUT_RANGE_MAX 3.0f
+#define OUTPUT_RANGE_MIN -20.0f
+#define OUTPUT_RANGE_MAX 20.0f
 
-float synth_fn(const float* x, int sample_idx, int fx, int dim) {
-    float t = sample_idx * 0.1;
-    
-    switch(dim % MAX_SYNTHETIC_OUTPUTS) {
-        case 0: 
-            return sinf(x[0 % fx]*2)*cosf(x[1 % fx]*1.5f) * expf(-0.1f * t) + 
-                   powf(x[2 % fx],2)*x[3 % fx] + 
-                   expf(-powf(x[4 % fx]-x[5 % fx],2)) + 
-                   0.5f*sinf(x[6 % fx]*x[7 % fx]*(float)M_PI) * (1.0f - expf(-0.2f * t)) +
-                   tanhf(x[8 % fx] + x[9 % fx]) +
-                   0.3f*cosf(x[10 % fx]*x[11 % fx]) +
-                   0.2f*powf(x[12 % fx], 2) +
-                   x[13 % fx]*sinf(x[14 % fx]);
-            
-        case 1: 
-            return tanhf(x[0 % fx]+x[1 % fx])*sinf(x[2 % fx]*2 + t) + 
-                   logf(fabsf(x[3 % fx])+1)*cosf(x[4 % fx]) + 
-                   0.3f*powf(x[5 % fx]-x[6 % fx],3) * expf(-0.15f * t) +
-                   expf(-powf(x[7 % fx],2)) +
-                   sinf(x[8 % fx]*x[9 % fx]*0.5f) +
-                   0.4f*cosf(x[10 % fx] + x[11 % fx] * t) +
-                   powf(x[12 % fx]*x[13 % fx], 2) +
-                   0.1f*x[14 % fx];
-            
-        case 2: 
-            return expf(-powf(x[0 % fx]-0.5f,2))*sinf(x[1 % fx]*3) + 
-                   powf(cosf(x[2 % fx]),2)*x[3 % fx] * (1.0f - expf(-0.1f * t)) + 
-                   0.2f*sinhf(x[4 % fx]*x[5 % fx]) +
-                   0.5f*tanhf(x[6 % fx] + x[7 % fx]) +
-                   powf(x[8 % fx], 3)*0.1f * expf(-0.05f * t) +
-                   cosf(x[9 % fx]*x[10 % fx]*(float)M_PI) +
-                   0.3f*expf(-powf(x[11 % fx]-x[12 % fx],2)) +
-                   0.2f*(x[13 % fx] + x[14 % fx]);
-            
-        case 3:
-            return powf(sinf(x[0 % fx]*x[1 % fx]), 2) +
-                   0.4f*tanhf(x[2 % fx] + x[3 % fx]*x[4 % fx] * t) +
-                   expf(-fabsf(x[5 % fx]-x[6 % fx])) +
-                   0.3f*cosf(x[7 % fx]*x[8 % fx]*2) * expf(-0.2f * t) +
-                   powf(x[9 % fx], 2)*sinf(x[10 % fx]) +
-                   0.2f*logf(fabsf(x[11 % fx]*x[12 % fx])+1) +
-                   0.1f*(x[13 % fx] - x[14 % fx]);
-            
-        default: 
+// Helper function to scale output to desired range
+float scale_output(float x) {
+    // First squash with tanh to get [-1, 1]
+    float squashed = tanhf(x);
+    // Then scale to [OUTPUT_RANGE_MIN, OUTPUT_RANGE_MAX]
+    return OUTPUT_RANGE_MIN + (squashed + 1.0f) * 0.5f * 
+           (OUTPUT_RANGE_MAX - OUTPUT_RANGE_MIN);
+}
+
+float temporal_pattern(int t, int pattern_type, float freq) {
+    switch(pattern_type % 4) {
+        case 0: // Damped oscillation
+            return sinf(freq * t * 0.1f) * expf(-0.05f * t);
+        case 1: // Growing oscillation
+            return sinf(freq * t * 0.1f) * (1.0f - expf(-0.05f * t));
+        case 2: // Periodic with phase shift
+            return sinf(freq * t * 0.1f + cosf(t * 0.05f));
+        case 3: // Chaotic-like pattern
+            return sinf(freq * t * 0.1f + sinf(t * 0.03f));
+        default:
             return 0.0f;
     }
 }
 
-void generate_synthetic_data(float** X, float** y, int num_samples, int input_dim, int output_dim) {
+float synth_fn(const float* x, int seq_idx, int fx, int dim) {
+    float seq_t = seq_idx * 0.1f;
+    float temporal_base = temporal_pattern(seq_idx, dim, 1.0f);
+    
+    float raw_output;
+    switch(dim % MAX_SYNTHETIC_OUTPUTS) {
+        case 0: 
+            raw_output = temporal_base * (
+                sinf(x[0 % fx]*2.0f + seq_t)*cosf(x[1 % fx]*1.5f) + 
+                expf(-powf(x[2 % fx]-x[3 % fx], 2))
+            );
+            break;
+            
+        case 1:
+            raw_output = temporal_base * (
+                tanhf(x[0 % fx] + x[1 % fx]) + 
+                logf(fabsf(x[2 % fx])+1.0f)*cosf(x[3 % fx]*seq_t)
+            );
+            break;
+            
+        case 2:
+            raw_output = temporal_base * (
+                expf(-powf(x[0 % fx]-0.5f, 2)) + 
+                0.2f*sinhf(x[1 % fx]*x[2 % fx]*seq_t)
+            );
+            break;
+            
+        case 3:
+            raw_output = temporal_base * (
+                powf(sinf(x[0 % fx]*x[1 % fx]*seq_t), 2) +
+                0.3f*cosf(x[2 % fx]*x[3 % fx]*seq_t)
+            );
+            break;
+            
+        default: 
+            raw_output = 0.0f;
+    }
+    
+    return scale_output(raw_output);
+}
+
+void generate_synthetic_data(float** X, float** y, int num_samples, int input_dim, int output_dim, int seq_len) {
     // Allocate memory
     *X = (float*)malloc(num_samples * input_dim * sizeof(float));
     *y = (float*)malloc(num_samples * output_dim * sizeof(float));
     
-    // Generate random input data
-    for (int i = 0; i < num_samples * input_dim; i++) {
-        float rand_val = (float)rand() / (float)RAND_MAX;
-        (*X)[i] = INPUT_RANGE_MIN + rand_val * (INPUT_RANGE_MAX - INPUT_RANGE_MIN);
+    // Generate random input data with some temporal smoothing
+    float* smooth_factors = (float*)malloc(input_dim * sizeof(float));
+    float* prev_values = (float*)malloc(input_dim * sizeof(float));
+    
+    // Initialize smoothing factors for each input dimension
+    for (int i = 0; i < input_dim; i++) {
+        smooth_factors[i] = 0.1f + 0.8f * ((float)rand() / (float)RAND_MAX);
+        prev_values[i] = INPUT_RANGE_MIN + 
+                        (INPUT_RANGE_MAX - INPUT_RANGE_MIN) * ((float)rand() / (float)RAND_MAX);
     }
     
-    // Generate output data using synth_fn
+    // Generate temporally smooth input data
     for (int i = 0; i < num_samples; i++) {
-        for (int j = 0; j < output_dim; j++) {
-            (*y)[i * output_dim + j] = synth_fn(&(*X)[i * input_dim], i, input_dim, j);
+        for (int j = 0; j < input_dim; j++) {
+            float target = INPUT_RANGE_MIN + 
+                          (INPUT_RANGE_MAX - INPUT_RANGE_MIN) * ((float)rand() / (float)RAND_MAX);
+            float smooth_val = prev_values[j] * (1.0f - smooth_factors[j]) + 
+                             target * smooth_factors[j];
+            (*X)[i * input_dim + j] = smooth_val;
+            prev_values[j] = smooth_val;
         }
     }
+    
+    // Generate output data using synth_fn with sequence dependencies
+    for (int i = 0; i < num_samples; i++) {
+        int seq_idx = i % seq_len;  // Position within the sequence
+        
+        for (int j = 0; j < output_dim; j++) {
+            (*y)[i * output_dim + j] = synth_fn(&(*X)[i * input_dim], 
+                                               seq_idx, input_dim, j);
+        }
+    }
+    
+    free(smooth_factors);
+    free(prev_values);
 }
 
 void save_data_to_csv(float* X, float* y, int num_samples, int input_dim, int output_dim, const char* filename) {

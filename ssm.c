@@ -1,12 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <math.h>
 #include <time.h>
 #include "data.h"
 #include "ssm.h"
 
 int main() {
-    srand(time(NULL));
+    srand(time(NULL) ^ getpid());
     openblas_set_num_threads(4);
 
     // Parameters
@@ -19,7 +20,7 @@ int main() {
     
     // Generate synthetic data
     float *X, *y;
-    generate_synthetic_data(&X, &y, num_samples, input_dim, output_dim);
+    generate_synthetic_data(&X, &y, num_samples, input_dim, output_dim, seq_length);
     
     // Initialize state space model
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, batch_size);
@@ -168,16 +169,21 @@ int main() {
         
         // Calculate R² with extra care
         double ss_tot = 0.0;
-        double ss_res = sum_sq_error;  // We already have this
-        
+        double ss_res = 0.0;
+
         for (int i = 0; i < num_samples; i++) {
             double actual = (double)y[i * output_dim + dim];
-            if (!isnan(actual)) {  // Add validity check
+            double pred = (double)all_predictions[i * output_dim + dim];
+            
+            if (!isnan(actual) && !isnan(pred)) {
                 double diff_from_mean = actual - mean_actual;
                 ss_tot += diff_from_mean * diff_from_mean;
+                
+                double residual = pred - actual;
+                ss_res += residual * residual;
             }
         }
-        
+
         double r2 = (ss_tot > 1e-10) ? (1.0 - ss_res / ss_tot) : 0.0;
         printf("R²: %.6f\n", r2);
         
