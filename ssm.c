@@ -14,9 +14,9 @@ int main() {
     const int input_dim = 16;
     const int state_dim = 512;
     const int output_dim = 4;
-    const int num_samples = 1024; // 32 * 32 samples
-    const int seq_length = 32;  // Process sequences of 32 steps
-    const int batch_size = 32;  // Process batches of 32 samples
+    const int seq_length = 32;
+    const int batch_size = 32;
+    const int num_samples = seq_length * batch_size;
     
     // Generate synthetic data
     float *X, *y;
