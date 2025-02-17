@@ -8,7 +8,6 @@
 
 int main() {
     srand(time(NULL) ^ getpid());
-    cudaSetDevice(0);
 
     // Parameters
     const int input_dim = 16;
