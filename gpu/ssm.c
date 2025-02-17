@@ -43,17 +43,17 @@ int main() {
                              ssm->batch_size * ssm->state_dim * sizeof(float)));
         
         // Forward pass
-        forward_pass_ssm(ssm, d_X);
+        forward_pass(ssm, d_X);
         
         // Calculate loss
-        float loss = calculate_loss_ssm(ssm, d_y);
+        float loss = calculate_loss(ssm, d_y);
         
         // Backward pass
-        zero_gradients_ssm(ssm);
-        backward_pass_ssm(ssm, d_X);
+        zero_gradients(ssm);
+        backward_pass(ssm, d_X);
         
         // Update weights
-        update_weights_ssm(ssm, learning_rate);
+        update_weights(ssm, learning_rate);
         
         // Print progress
         if ((epoch + 1) % 100 == 0) {
@@ -70,24 +70,24 @@ int main() {
              localtime(&now));
 
     // Save model and data
-    save_ssm(ssm, model_fname);
+    save_model(ssm, model_fname);
     save_data_to_csv(h_X, h_y, num_samples, input_dim, output_dim, data_fname);
     
     // Verify saved model
     printf("\nVerifying saved model...\n");
     
     // Load the model back
-    SSM* loaded_ssm = load_ssm(model_fname);
+    SSM* loaded_ssm = load_model(model_fname);
     
     // Reset state
     CHECK_CUDA(cudaMemset(loaded_ssm->d_state, 0, 
                          loaded_ssm->batch_size * loaded_ssm->state_dim * sizeof(float)));
     
     // Forward pass with loaded model
-    forward_pass_ssm(loaded_ssm, d_X);
+    forward_pass(loaded_ssm, d_X);
     
     // Calculate and print loss with loaded model
-    float verification_loss = calculate_loss_ssm(loaded_ssm, d_y);
+    float verification_loss = calculate_loss(loaded_ssm, d_y);
     printf("Loss with loaded model: %.8f\n", verification_loss);
 
     printf("\nEvaluating model performance...\n");

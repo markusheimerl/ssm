@@ -240,7 +240,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     return ssm;
 }
 
-void forward_pass_ssm(SSM* ssm, float* d_X) {
+void forward_pass(SSM* ssm, float* d_X) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
@@ -290,7 +290,7 @@ void forward_pass_ssm(SSM* ssm, float* d_X) {
                          cudaMemcpyDeviceToDevice));
 }
 
-float calculate_loss_ssm(SSM* ssm, float* d_y) {
+float calculate_loss(SSM* ssm, float* d_y) {
     int size = ssm->batch_size * ssm->output_dim;
     int block_size = 256;
     int num_blocks = (size + block_size - 1) / block_size;
@@ -309,14 +309,14 @@ float calculate_loss_ssm(SSM* ssm, float* d_y) {
     return loss / size;
 }
 
-void zero_gradients_ssm(SSM* ssm) {
+void zero_gradients(SSM* ssm) {
     CHECK_CUDA(cudaMemset(ssm->d_A_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_B_grad, 0, ssm->state_dim * ssm->input_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_C_grad, 0, ssm->output_dim * ssm->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(float)));
 }
 
-void backward_pass_ssm(SSM* ssm, float* d_X) {
+void backward_pass(SSM* ssm, float* d_X) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
@@ -373,7 +373,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                             ssm->d_B_grad, ssm->state_dim));
 }
 
-void update_weights_ssm(SSM* ssm, float learning_rate) {
+void update_weights(SSM* ssm, float learning_rate) {
     ssm->t++;
     float beta1_t = powf(ssm->beta1, ssm->t);
     float beta2_t = powf(ssm->beta2, ssm->t);
@@ -448,7 +448,7 @@ void free_ssm(SSM* ssm) {
     free(ssm);
 }
 
-void save_ssm(SSM* ssm, const char* filename) {
+void save_model(SSM* ssm, const char* filename) {
     FILE* file = fopen(filename, "wb");
     if (!file) {
         printf("Error opening file for writing: %s\n", filename);
@@ -533,7 +533,7 @@ void save_ssm(SSM* ssm, const char* filename) {
     printf("Model saved to %s\n", filename);
 }
 
-SSM* load_ssm(const char* filename) {
+SSM* load_model(const char* filename) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
         printf("Error opening file for reading: %s\n", filename);
