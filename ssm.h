@@ -20,25 +20,20 @@ typedef struct {
     float* C_grad;
     float* D_grad;
 
-    // Adam parameters
-    float* A_m;
-    float* A_v;
-    float* B_m;
-    float* B_v;
-    float* C_m;
-    float* C_v;
-    float* D_m;
-    float* D_v;
-    float beta1;
-    float beta2;
-    float epsilon;
-    int t;
+    // Fisher Information Matrices
+    float* A_fim;
+    float* B_fim;
+    float* C_fim;
+    float* D_fim;
+
+    // FIM damping factor
+    float damping;
     float weight_decay;
 
     // Helper arrays
     float* state;          // batch_size x state_dim
     float* next_state;     // batch_size x state_dim
-    float* pre_state;      // batch_size x state_dim (pre-activation)
+    float* pre_state;      // batch_size x state_dim
     float* predictions;    // batch_size x output_dim
     float* error;          // batch_size x output_dim
     float* state_error;    // batch_size x state_dim
@@ -73,11 +68,8 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     ssm->output_dim = output_dim;
     ssm->batch_size = batch_size;
     
-    // Initialize Adam parameters
-    ssm->beta1 = 0.9f;
-    ssm->beta2 = 0.999f;
-    ssm->epsilon = 1e-8f;
-    ssm->t = 0;
+    // Initialize NGD parameters
+    ssm->damping = 1e-4f;
     ssm->weight_decay = 0.01f;
     
     // Allocate matrices
@@ -92,15 +84,11 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     ssm->C_grad = (float*)malloc(output_dim * state_dim * sizeof(float));
     ssm->D_grad = (float*)malloc(output_dim * input_dim * sizeof(float));
     
-    // Allocate Adam buffers
-    ssm->A_m = (float*)calloc(state_dim * state_dim, sizeof(float));
-    ssm->A_v = (float*)calloc(state_dim * state_dim, sizeof(float));
-    ssm->B_m = (float*)calloc(state_dim * input_dim, sizeof(float));
-    ssm->B_v = (float*)calloc(state_dim * input_dim, sizeof(float));
-    ssm->C_m = (float*)calloc(output_dim * state_dim, sizeof(float));
-    ssm->C_v = (float*)calloc(output_dim * state_dim, sizeof(float));
-    ssm->D_m = (float*)calloc(output_dim * input_dim, sizeof(float));
-    ssm->D_v = (float*)calloc(output_dim * input_dim, sizeof(float));
+    // Allocate Fisher Information Matrices
+    ssm->A_fim = (float*)calloc(state_dim * state_dim, sizeof(float));
+    ssm->B_fim = (float*)calloc(state_dim * input_dim, sizeof(float));
+    ssm->C_fim = (float*)calloc(output_dim * state_dim, sizeof(float));
+    ssm->D_fim = (float*)calloc(output_dim * input_dim, sizeof(float));
     
     // Allocate helper arrays
     ssm->state = (float*)calloc(batch_size * state_dim, sizeof(float));
@@ -141,14 +129,10 @@ void free_ssm(SSM* ssm) {
     free(ssm->B_grad);
     free(ssm->C_grad);
     free(ssm->D_grad);
-    free(ssm->A_m);
-    free(ssm->A_v);
-    free(ssm->B_m);
-    free(ssm->B_v);
-    free(ssm->C_m);
-    free(ssm->C_v);
-    free(ssm->D_m);
-    free(ssm->D_v);
+    free(ssm->A_fim);
+    free(ssm->B_fim);
+    free(ssm->C_fim);
+    free(ssm->D_fim);
     free(ssm->state);
     free(ssm->next_state);
     free(ssm->pre_state);
@@ -255,32 +239,49 @@ void backward_pass(SSM* ssm, float* X) {
                 1.0f, ssm->B_grad, ssm->state_dim);
 }
 
+// Helper function to compute FIM inverse-vector product
+void fim_solve(SSM* ssm, float* fim, float* grad, float* result, int size) {
+    // Simple diagonal approximation of FIM
+    for (int i = 0; i < size; i++) {
+        float fim_entry = fim[i] + ssm->damping;
+        result[i] = grad[i] / (sqrtf(fim_entry) + 1e-8f);
+    }
+}
+
 void update_weights(SSM* ssm, float learning_rate) {
-    ssm->t++;
-    float beta1_t = powf(ssm->beta1, ssm->t);
-    float beta2_t = powf(ssm->beta2, ssm->t);
-    float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
-    
-    #define UPDATE_MATRIX(W, W_grad, M, V, size) do { \
+    // Update Fisher Information Matrix estimates
+    #define UPDATE_FIM(fim, grad, size) do { \
         for (int i = 0; i < size; i++) { \
-            float grad = W_grad[i] / ssm->batch_size; \
-            M[i] = ssm->beta1 * M[i] + (1.0f - ssm->beta1) * grad; \
-            V[i] = ssm->beta2 * V[i] + (1.0f - ssm->beta2) * grad * grad; \
-            float update = alpha_t * M[i] / (sqrtf(V[i]) + ssm->epsilon); \
+            float g = grad[i] / ssm->batch_size; \
+            fim[i] = 0.95f * fim[i] + 0.05f * (g * g); \
+        } \
+    } while(0)
+
+    UPDATE_FIM(ssm->A_fim, ssm->A_grad, ssm->state_dim * ssm->state_dim);
+    UPDATE_FIM(ssm->B_fim, ssm->B_grad, ssm->state_dim * ssm->input_dim);
+    UPDATE_FIM(ssm->C_fim, ssm->C_grad, ssm->output_dim * ssm->state_dim);
+    UPDATE_FIM(ssm->D_fim, ssm->D_grad, ssm->output_dim * ssm->input_dim);
+
+    // Temporary storage for natural gradient
+    float* nat_grad = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
+
+    // Update matrices using natural gradient
+    #define UPDATE_MATRIX(W, W_grad, W_fim, size) do { \
+        fim_solve(ssm, W_fim, W_grad, nat_grad, size); \
+        for (int i = 0; i < size; i++) { \
+            float update = learning_rate * nat_grad[i] / ssm->batch_size; \
             W[i] = W[i] * (1.0f - learning_rate * ssm->weight_decay) - update; \
         } \
     } while(0)
-    
-    UPDATE_MATRIX(ssm->A, ssm->A_grad, ssm->A_m, ssm->A_v, 
-                 ssm->state_dim * ssm->state_dim);
-    UPDATE_MATRIX(ssm->B, ssm->B_grad, ssm->B_m, ssm->B_v, 
-                 ssm->state_dim * ssm->input_dim);
-    UPDATE_MATRIX(ssm->C, ssm->C_grad, ssm->C_m, ssm->C_v, 
-                 ssm->output_dim * ssm->state_dim);
-    UPDATE_MATRIX(ssm->D, ssm->D_grad, ssm->D_m, ssm->D_v, 
-                 ssm->output_dim * ssm->input_dim);
-    
+
+    UPDATE_MATRIX(ssm->A, ssm->A_grad, ssm->A_fim, ssm->state_dim * ssm->state_dim);
+    UPDATE_MATRIX(ssm->B, ssm->B_grad, ssm->B_fim, ssm->state_dim * ssm->input_dim);
+    UPDATE_MATRIX(ssm->C, ssm->C_grad, ssm->C_fim, ssm->output_dim * ssm->state_dim);
+    UPDATE_MATRIX(ssm->D, ssm->D_grad, ssm->D_fim, ssm->output_dim * ssm->input_dim);
+
+    free(nat_grad);
     #undef UPDATE_MATRIX
+    #undef UPDATE_FIM
 }
 
 void save_model(SSM* ssm, const char* filename) {
@@ -300,18 +301,13 @@ void save_model(SSM* ssm, const char* filename) {
     fwrite(ssm->C, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(ssm->D, sizeof(float), ssm->output_dim * ssm->input_dim, file);
     
-    fwrite(&ssm->t, sizeof(int), 1, file);
-    fwrite(ssm->A_m, sizeof(float), ssm->state_dim * ssm->state_dim, file);
-    fwrite(ssm->A_v, sizeof(float), ssm->state_dim * ssm->state_dim, file);
-    fwrite(ssm->B_m, sizeof(float), ssm->state_dim * ssm->input_dim, file);
-    fwrite(ssm->B_v, sizeof(float), ssm->state_dim * ssm->input_dim, file);
-    fwrite(ssm->C_m, sizeof(float), ssm->output_dim * ssm->state_dim, file);
-    fwrite(ssm->C_v, sizeof(float), ssm->output_dim * ssm->state_dim, file);
-    fwrite(ssm->D_m, sizeof(float), ssm->output_dim * ssm->input_dim, file);
-    fwrite(ssm->D_v, sizeof(float), ssm->output_dim * ssm->input_dim, file);
+    // Save FIM matrices
+    fwrite(ssm->A_fim, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    fwrite(ssm->B_fim, sizeof(float), ssm->state_dim * ssm->input_dim, file);
+    fwrite(ssm->C_fim, sizeof(float), ssm->output_dim * ssm->state_dim, file);
+    fwrite(ssm->D_fim, sizeof(float), ssm->output_dim * ssm->input_dim, file);
     
     fclose(file);
-    printf("Model saved to %s\n", filename);
 }
 
 SSM* load_model(const char* filename) {
@@ -334,18 +330,11 @@ SSM* load_model(const char* filename) {
     fread(ssm->C, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D, sizeof(float), output_dim * input_dim, file);
     
-    fread(&ssm->t, sizeof(int), 1, file);
-    fread(ssm->A_m, sizeof(float), state_dim * state_dim, file);
-    fread(ssm->A_v, sizeof(float), state_dim * state_dim, file);
-    fread(ssm->B_m, sizeof(float), state_dim * input_dim, file);
-    fread(ssm->B_v, sizeof(float), state_dim * input_dim, file);
-    fread(ssm->C_m, sizeof(float), output_dim * state_dim, file);
-    fread(ssm->C_v, sizeof(float), output_dim * state_dim, file);
-    fread(ssm->D_m, sizeof(float), output_dim * input_dim, file);
-    fread(ssm->D_v, sizeof(float), output_dim * input_dim, file);
-    
-    fclose(file);
-    printf("Model loaded from %s\n", filename);
+    // Load FIM matrices
+    fread(ssm->A_fim, sizeof(float), state_dim * state_dim, file);
+    fread(ssm->B_fim, sizeof(float), state_dim * input_dim, file);
+    fread(ssm->C_fim, sizeof(float), output_dim * state_dim, file);
+    fread(ssm->D_fim, sizeof(float), output_dim * input_dim, file);
     
     return ssm;
 }
