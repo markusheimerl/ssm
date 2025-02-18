@@ -6,6 +6,7 @@
 #include <string.h>
 #include <math.h>
 #include <cblas.h>
+#include <lapacke.h>
 
 typedef struct {
     // State transition matrices
@@ -20,15 +21,21 @@ typedef struct {
     float* C_grad;
     float* D_grad;
 
-    // Fisher Information Matrices
-    float* A_fim;
-    float* B_fim;
-    float* C_fim;
-    float* D_fim;
+    // Block Fisher Information Matrices
+    float* A_fim;  // state_dim x state_dim
+    float* B_fim;  // input_dim x input_dim
+    float* C_fim;  // output_dim x output_dim
+    float* D_fim;  // output_dim x input_dim
 
-    // FIM damping factor
+    // Workspaces for FIM computations
+    float* fim_workspace;
+    float* eigenvals;
+    float* eigenvecs;
+
+    // FIM parameters
     float damping;
     float weight_decay;
+    float fim_ema_rate;
 
     // Helper arrays
     float* state;          // batch_size x state_dim
@@ -68,9 +75,10 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     ssm->output_dim = output_dim;
     ssm->batch_size = batch_size;
     
-    // Initialize NGD parameters
+    // Initialize parameters
     ssm->damping = 1e-4f;
     ssm->weight_decay = 0.01f;
+    ssm->fim_ema_rate = 0.05f;
     
     // Allocate matrices
     ssm->A = (float*)malloc(state_dim * state_dim * sizeof(float));
@@ -84,11 +92,20 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     ssm->C_grad = (float*)malloc(output_dim * state_dim * sizeof(float));
     ssm->D_grad = (float*)malloc(output_dim * input_dim * sizeof(float));
     
-    // Allocate Fisher Information Matrices
+    // Allocate block FIMs
     ssm->A_fim = (float*)calloc(state_dim * state_dim, sizeof(float));
-    ssm->B_fim = (float*)calloc(state_dim * input_dim, sizeof(float));
-    ssm->C_fim = (float*)calloc(output_dim * state_dim, sizeof(float));
+    ssm->B_fim = (float*)calloc(input_dim * input_dim, sizeof(float));
+    ssm->C_fim = (float*)calloc(output_dim * output_dim, sizeof(float));
     ssm->D_fim = (float*)calloc(output_dim * input_dim, sizeof(float));
+    
+    // Allocate workspaces
+    int max_dim = state_dim;
+    if (input_dim > max_dim) max_dim = input_dim;
+    if (output_dim > max_dim) max_dim = output_dim;
+    
+    ssm->fim_workspace = (float*)malloc(max_dim * max_dim * sizeof(float));
+    ssm->eigenvals = (float*)malloc(max_dim * sizeof(float));
+    ssm->eigenvecs = (float*)malloc(max_dim * max_dim * sizeof(float));
     
     // Allocate helper arrays
     ssm->state = (float*)calloc(batch_size * state_dim, sizeof(float));
@@ -239,49 +256,101 @@ void backward_pass(SSM* ssm, float* X) {
                 1.0f, ssm->B_grad, ssm->state_dim);
 }
 
-// Helper function to compute FIM inverse-vector product
-void fim_solve(SSM* ssm, float* fim, float* grad, float* result, int size) {
-    // Simple diagonal approximation of FIM
-    for (int i = 0; i < size; i++) {
-        float fim_entry = fim[i] + ssm->damping;
-        result[i] = grad[i] / (sqrtf(fim_entry) + 1e-8f);
+void update_block_fim(float* fim, float* grad, int rows, int cols, 
+                     int batch_size, float ema_rate) {
+    // Use min(rows, cols) for the FIM dimension
+    int fim_dim = (rows < cols) ? rows : cols;
+    float* new_fim = (float*)calloc(fim_dim * fim_dim, sizeof(float));
+    
+    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                fim_dim, fim_dim, batch_size,
+                1.0f/batch_size, grad, fim_dim,
+                grad, fim_dim,
+                0.0f, new_fim, fim_dim);
+    
+    for(int i = 0; i < fim_dim * fim_dim; i++) {
+        fim[i] = (1.0f - ema_rate) * fim[i] + ema_rate * new_fim[i];
     }
+    
+    free(new_fim);
+}
+
+void block_fim_solve(SSM* ssm, float* fim, float* grad, float* result,
+                    int rows, float damping) {
+    // Copy FIM for eigendecomposition
+    float* fim_copy = (float*)malloc(rows * rows * sizeof(float));
+    memcpy(fim_copy, fim, rows * rows * sizeof(float));
+    
+    // Compute eigendecomposition
+    LAPACKE_ssyev(LAPACK_ROW_MAJOR, 'V', 'U', rows, fim_copy, rows, 
+                  ssm->eigenvals);
+    
+    // Store eigenvectors
+    memcpy(ssm->eigenvecs, fim_copy, rows * rows * sizeof(float));
+    
+    // Apply damping and compute natural gradient
+    // Step 1: V^T * grad
+    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                rows, 1, rows,
+                1.0f, ssm->eigenvecs, rows,
+                grad, 1,
+                0.0f, result, 1);
+    
+    // Step 2: Apply scaled eigenvalues
+    for(int i = 0; i < rows; i++) {
+        float lambda = ssm->eigenvals[i] + damping;
+        if (lambda > 1e-6f) {
+            result[i] /= lambda;
+        } else {
+            result[i] = 0.0f;
+        }
+    }
+    
+    // Step 3: V * result
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                rows, 1, rows,
+                1.0f, ssm->eigenvecs, rows,
+                result, 1,
+                0.0f, grad, 1);
+    
+    free(fim_copy);
 }
 
 void update_weights(SSM* ssm, float learning_rate) {
-    // Update Fisher Information Matrix estimates
-    #define UPDATE_FIM(fim, grad, size) do { \
-        for (int i = 0; i < size; i++) { \
-            float g = grad[i] / ssm->batch_size; \
-            fim[i] = 0.95f * fim[i] + 0.05f * (g * g); \
+    // Update block FIMs
+    update_block_fim(ssm->A_fim, ssm->A_grad, ssm->state_dim, ssm->state_dim,
+                    ssm->batch_size, ssm->fim_ema_rate);
+    update_block_fim(ssm->B_fim, ssm->B_grad, ssm->input_dim, ssm->input_dim,
+                    ssm->batch_size, ssm->fim_ema_rate);
+    update_block_fim(ssm->C_fim, ssm->C_grad, ssm->output_dim, ssm->output_dim,
+                    ssm->batch_size, ssm->fim_ema_rate);
+    update_block_fim(ssm->D_fim, ssm->D_grad, ssm->output_dim, ssm->input_dim,
+                    ssm->batch_size, ssm->fim_ema_rate);
+    
+    // Compute natural gradients
+    block_fim_solve(ssm, ssm->A_fim, ssm->A_grad, ssm->fim_workspace,
+                   ssm->state_dim, ssm->damping);
+    block_fim_solve(ssm, ssm->B_fim, ssm->B_grad, ssm->fim_workspace,
+                   ssm->input_dim, ssm->damping);
+    block_fim_solve(ssm, ssm->C_fim, ssm->C_grad, ssm->fim_workspace,
+                   ssm->output_dim, ssm->damping);
+    block_fim_solve(ssm, ssm->D_fim, ssm->D_grad, ssm->fim_workspace,
+                   ssm->output_dim, ssm->damping);
+    
+    // Apply updates with weight decay
+    #define UPDATE_MATRIX(W, W_grad, size) do { \
+        for(int i = 0; i < size; i++) { \
+            W[i] = W[i] * (1.0f - learning_rate * ssm->weight_decay) - \
+                   learning_rate * W_grad[i] / ssm->batch_size; \
         } \
     } while(0)
-
-    UPDATE_FIM(ssm->A_fim, ssm->A_grad, ssm->state_dim * ssm->state_dim);
-    UPDATE_FIM(ssm->B_fim, ssm->B_grad, ssm->state_dim * ssm->input_dim);
-    UPDATE_FIM(ssm->C_fim, ssm->C_grad, ssm->output_dim * ssm->state_dim);
-    UPDATE_FIM(ssm->D_fim, ssm->D_grad, ssm->output_dim * ssm->input_dim);
-
-    // Temporary storage for natural gradient
-    float* nat_grad = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
-
-    // Update matrices using natural gradient
-    #define UPDATE_MATRIX(W, W_grad, W_fim, size) do { \
-        fim_solve(ssm, W_fim, W_grad, nat_grad, size); \
-        for (int i = 0; i < size; i++) { \
-            float update = learning_rate * nat_grad[i] / ssm->batch_size; \
-            W[i] = W[i] * (1.0f - learning_rate * ssm->weight_decay) - update; \
-        } \
-    } while(0)
-
-    UPDATE_MATRIX(ssm->A, ssm->A_grad, ssm->A_fim, ssm->state_dim * ssm->state_dim);
-    UPDATE_MATRIX(ssm->B, ssm->B_grad, ssm->B_fim, ssm->state_dim * ssm->input_dim);
-    UPDATE_MATRIX(ssm->C, ssm->C_grad, ssm->C_fim, ssm->output_dim * ssm->state_dim);
-    UPDATE_MATRIX(ssm->D, ssm->D_grad, ssm->D_fim, ssm->output_dim * ssm->input_dim);
-
-    free(nat_grad);
+    
+    UPDATE_MATRIX(ssm->A, ssm->A_grad, ssm->state_dim * ssm->state_dim);
+    UPDATE_MATRIX(ssm->B, ssm->B_grad, ssm->state_dim * ssm->input_dim);
+    UPDATE_MATRIX(ssm->C, ssm->C_grad, ssm->output_dim * ssm->state_dim);
+    UPDATE_MATRIX(ssm->D, ssm->D_grad, ssm->output_dim * ssm->input_dim);
+    
     #undef UPDATE_MATRIX
-    #undef UPDATE_FIM
 }
 
 void save_model(SSM* ssm, const char* filename) {

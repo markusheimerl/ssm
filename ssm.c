@@ -79,7 +79,7 @@ int main() {
         }
         
         // Print progress
-        if ((epoch + 1) % 100 == 0) {
+        if ((epoch + 1) % 1 == 0) {
             printf("Epoch [%d/%d], Average Loss: %.8f\n", 
                    epoch + 1, num_epochs, epoch_loss / num_batches);
         }
