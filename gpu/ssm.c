@@ -157,33 +157,60 @@ int main() {
         printf("\nDimension %d:\n", d);
         printf("--------------\n");
         
-        // Calculate MSE and R²
+        // Calculate statistics
         double sum_sq_error = 0.0;
         double sum_y = 0.0;
         double sum_sq_y = 0.0;
+        double sum_yhat = 0.0;
+        double sum_sq_yhat = 0.0;
+        double sum_y_yhat = 0.0;
+        int valid_samples = 0;
         
-        // First pass: compute mean
-        for (int i = 0; i < num_samples; i++) {
-            sum_y += h_y[i * output_dim + d];
-        }
-        double mean_y = sum_y / num_samples;
-        
-        // Second pass: compute MSE and sum of squares
+        // First pass: calculate sums
         for (int i = 0; i < num_samples; i++) {
             double y_i = h_y[i * output_dim + d];
             double yhat_i = h_predictions[i * output_dim + d];
             
-            double error = y_i - yhat_i;
-            sum_sq_error += error * error;
-            sum_sq_y += (y_i - mean_y) * (y_i - mean_y);
+            if (!isnan(y_i) && !isnan(yhat_i) && !isinf(y_i) && !isinf(yhat_i)) {
+                sum_sq_error += (y_i - yhat_i) * (y_i - yhat_i);
+                sum_y += y_i;
+                sum_sq_y += y_i * y_i;
+                sum_yhat += yhat_i;
+                sum_sq_yhat += yhat_i * yhat_i;
+                sum_y_yhat += y_i * yhat_i;
+                valid_samples++;
+            }
         }
         
-        double mse = sum_sq_error / num_samples;
-        double r_squared = 1.0 - (sum_sq_error / sum_sq_y);
+        if (valid_samples == 0) {
+            printf("No valid samples for evaluation!\n");
+            continue;
+        }
+
+        // Calculate statistics
+        double mean_y = sum_y / valid_samples;
+        double mean_yhat = sum_yhat / valid_samples;
+        double mse = sum_sq_error / valid_samples;
         
+        // Calculate R-squared components
+        double ss_tot = sum_sq_y - (sum_y * sum_y / valid_samples);
+        double ss_res = sum_sq_error;
+        
+        // Calculate correlation coefficient
+        double numerator = sum_y_yhat - (sum_y * sum_yhat / valid_samples);
+        double denominator = sqrt((sum_sq_y - (sum_y * sum_y / valid_samples)) * 
+                                (sum_sq_yhat - (sum_yhat * sum_yhat / valid_samples)));
+        double correlation = (denominator > 1e-10) ? numerator / denominator : 0.0;
+        
+        // Calculate R-squared
+        double r_squared = (ss_tot > 1e-10) ? 1.0 - (ss_res / ss_tot) : 0.0;
+
         // Print metrics
         printf("MSE: %.6f\n", mse);
         printf("R²:  %.6f\n", r_squared);
+        printf("Correlation: %.6f\n", correlation);
+        printf("Mean Actual: %.6f\n", mean_y);
+        printf("Mean Predicted: %.6f\n", mean_yhat);
         
         // Print sample predictions
         printf("\nSample Predictions (first 10):\n");
@@ -192,7 +219,9 @@ int main() {
         for (int i = 0; i < 10 && i < num_samples; i++) {
             double y_i = h_y[i * output_dim + d];
             double yhat_i = h_predictions[i * output_dim + d];
-            printf("%.6f\t%.6f\t%.6f\n", y_i, yhat_i, yhat_i - y_i);
+            if (!isnan(y_i) && !isnan(yhat_i) && !isinf(y_i) && !isinf(yhat_i)) {
+                printf("%.6f\t%.6f\t%.6f\n", y_i, yhat_i, yhat_i - y_i);
+            }
         }
         
         total_mse += mse;
