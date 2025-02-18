@@ -109,7 +109,7 @@ void generate_synthetic_data(float** X, float** y, int num_samples, int input_di
         for(int j = 0; j < input_dim; j++) {
             (*X)[i * input_dim + j] = INPUT_RANGE_MIN + 
                 (INPUT_RANGE_MAX - INPUT_RANGE_MIN) * 
-                ((float)rand() / RAND_MAX);
+                ((float)rand() / (float)RAND_MAX);
         }
         
         // Reset state at sequence boundaries
