@@ -27,15 +27,13 @@ typedef struct {
     float* C_fim;  // output_dim x output_dim
     float* D_fim;  // output_dim x input_dim
 
-    // Workspaces for FIM computations
-    float* fim_workspace;
-    float* eigenvals;
-    float* eigenvecs;
-
-    // FIM parameters
-    float damping;
-    float weight_decay;
-    float fim_ema_rate;
+    // Pre-allocated workspaces
+    float* fim_workspace;    // max_dim x max_dim
+    float* eigenvals;        // max_dim
+    float* eigenvecs;        // max_dim x max_dim
+    float* new_fim;          // max_dim x max_dim
+    float* fim_copy;         // max_dim x max_dim
+    float* nat_grad_workspace; // max_dim
 
     // Helper arrays
     float* state;          // batch_size x state_dim
@@ -45,11 +43,17 @@ typedef struct {
     float* error;          // batch_size x output_dim
     float* state_error;    // batch_size x state_dim
 
+    // FIM parameters
+    float damping;
+    float weight_decay;
+    float fim_ema_rate;
+
     // Dimensions
     int input_dim;
     int state_dim;
     int output_dim;
     int batch_size;
+    int max_dim;
 } SSM;
 
 void swish_forward(float* x, int size) {
@@ -75,6 +79,11 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     ssm->output_dim = output_dim;
     ssm->batch_size = batch_size;
     
+    // Find maximum dimension for workspace allocation
+    ssm->max_dim = input_dim;
+    if (state_dim > ssm->max_dim) ssm->max_dim = state_dim;
+    if (output_dim > ssm->max_dim) ssm->max_dim = output_dim;
+    
     // Initialize parameters
     ssm->damping = 1e-4f;
     ssm->weight_decay = 0.01f;
@@ -99,13 +108,13 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     ssm->D_fim = (float*)calloc(output_dim * input_dim, sizeof(float));
     
     // Allocate workspaces
-    int max_dim = state_dim;
-    if (input_dim > max_dim) max_dim = input_dim;
-    if (output_dim > max_dim) max_dim = output_dim;
-    
-    ssm->fim_workspace = (float*)malloc(max_dim * max_dim * sizeof(float));
-    ssm->eigenvals = (float*)malloc(max_dim * sizeof(float));
-    ssm->eigenvecs = (float*)malloc(max_dim * max_dim * sizeof(float));
+    int max_workspace = ssm->max_dim * ssm->max_dim;
+    ssm->fim_workspace = (float*)malloc(max_workspace * sizeof(float));
+    ssm->eigenvals = (float*)malloc(ssm->max_dim * sizeof(float));
+    ssm->eigenvecs = (float*)malloc(max_workspace * sizeof(float));
+    ssm->new_fim = (float*)malloc(max_workspace * sizeof(float));
+    ssm->fim_copy = (float*)malloc(max_workspace * sizeof(float));
+    ssm->nat_grad_workspace = (float*)malloc(ssm->max_dim * sizeof(float));
     
     // Allocate helper arrays
     ssm->state = (float*)calloc(batch_size * state_dim, sizeof(float));
@@ -150,6 +159,12 @@ void free_ssm(SSM* ssm) {
     free(ssm->B_fim);
     free(ssm->C_fim);
     free(ssm->D_fim);
+    free(ssm->fim_workspace);
+    free(ssm->eigenvals);
+    free(ssm->eigenvecs);
+    free(ssm->new_fim);
+    free(ssm->fim_copy);
+    free(ssm->nat_grad_workspace);
     free(ssm->state);
     free(ssm->next_state);
     free(ssm->pre_state);
@@ -256,86 +271,74 @@ void backward_pass(SSM* ssm, float* X) {
                 1.0f, ssm->B_grad, ssm->state_dim);
 }
 
-void update_block_fim(float* fim, float* grad, int rows, int cols, 
+void update_block_fim(SSM* ssm, float* fim, float* grad, int rows,
                      int batch_size, float ema_rate) {
-    // Use min(rows, cols) for the FIM dimension
-    int fim_dim = (rows < cols) ? rows : cols;
-    float* new_fim = (float*)calloc(fim_dim * fim_dim, sizeof(float));
+    memset(ssm->new_fim, 0, rows * rows * sizeof(float));
     
+    // Compute new FIM estimate using outer product of gradients
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                fim_dim, fim_dim, batch_size,
-                1.0f/batch_size, grad, fim_dim,
-                grad, fim_dim,
-                0.0f, new_fim, fim_dim);
+                rows, rows, batch_size,
+                1.0f/batch_size, grad, rows,
+                grad, rows,
+                0.0f, ssm->new_fim, rows);
     
-    for(int i = 0; i < fim_dim * fim_dim; i++) {
-        fim[i] = (1.0f - ema_rate) * fim[i] + ema_rate * new_fim[i];
+    // Update FIM using exponential moving average
+    for(int i = 0; i < rows * rows; i++) {
+        fim[i] = (1.0f - ema_rate) * fim[i] + ema_rate * ssm->new_fim[i];
     }
-    
-    free(new_fim);
 }
 
-void block_fim_solve(SSM* ssm, float* fim, float* grad, float* result,
-                    int rows, float damping) {
+void block_fim_solve(SSM* ssm, float* fim, float* grad, int rows) {
     // Copy FIM for eigendecomposition
-    float* fim_copy = (float*)malloc(rows * rows * sizeof(float));
-    memcpy(fim_copy, fim, rows * rows * sizeof(float));
+    memcpy(ssm->fim_copy, fim, rows * rows * sizeof(float));
     
     // Compute eigendecomposition
-    LAPACKE_ssyev(LAPACK_ROW_MAJOR, 'V', 'U', rows, fim_copy, rows, 
-                  ssm->eigenvals);
+    LAPACKE_ssyev(LAPACK_ROW_MAJOR, 'V', 'U', rows, ssm->fim_copy, rows, ssm->eigenvals);
     
     // Store eigenvectors
-    memcpy(ssm->eigenvecs, fim_copy, rows * rows * sizeof(float));
+    memcpy(ssm->eigenvecs, ssm->fim_copy, rows * rows * sizeof(float));
     
-    // Apply damping and compute natural gradient
     // Step 1: V^T * grad
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                 rows, 1, rows,
                 1.0f, ssm->eigenvecs, rows,
                 grad, 1,
-                0.0f, result, 1);
+                0.0f, ssm->nat_grad_workspace, 1);
     
     // Step 2: Apply scaled eigenvalues
     for(int i = 0; i < rows; i++) {
-        float lambda = ssm->eigenvals[i] + damping;
+        float lambda = ssm->eigenvals[i] + ssm->damping;
         if (lambda > 1e-6f) {
-            result[i] /= lambda;
+            ssm->nat_grad_workspace[i] /= lambda;
         } else {
-            result[i] = 0.0f;
+            ssm->nat_grad_workspace[i] = 0.0f;
         }
     }
     
-    // Step 3: V * result
+    // Step 3: V * ssm->nat_grad_workspace
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 rows, 1, rows,
                 1.0f, ssm->eigenvecs, rows,
-                result, 1,
+                ssm->nat_grad_workspace, 1,
                 0.0f, grad, 1);
-    
-    free(fim_copy);
 }
 
 void update_weights(SSM* ssm, float learning_rate) {
     // Update block FIMs
-    update_block_fim(ssm->A_fim, ssm->A_grad, ssm->state_dim, ssm->state_dim,
+    update_block_fim(ssm, ssm->A_fim, ssm->A_grad, ssm->state_dim,
                     ssm->batch_size, ssm->fim_ema_rate);
-    update_block_fim(ssm->B_fim, ssm->B_grad, ssm->input_dim, ssm->input_dim,
+    update_block_fim(ssm, ssm->B_fim, ssm->B_grad, ssm->input_dim,
                     ssm->batch_size, ssm->fim_ema_rate);
-    update_block_fim(ssm->C_fim, ssm->C_grad, ssm->output_dim, ssm->output_dim,
+    update_block_fim(ssm, ssm->C_fim, ssm->C_grad, ssm->output_dim,
                     ssm->batch_size, ssm->fim_ema_rate);
-    update_block_fim(ssm->D_fim, ssm->D_grad, ssm->output_dim, ssm->input_dim,
+    update_block_fim(ssm, ssm->D_fim, ssm->D_grad, ssm->output_dim,
                     ssm->batch_size, ssm->fim_ema_rate);
     
     // Compute natural gradients
-    block_fim_solve(ssm, ssm->A_fim, ssm->A_grad, ssm->fim_workspace,
-                   ssm->state_dim, ssm->damping);
-    block_fim_solve(ssm, ssm->B_fim, ssm->B_grad, ssm->fim_workspace,
-                   ssm->input_dim, ssm->damping);
-    block_fim_solve(ssm, ssm->C_fim, ssm->C_grad, ssm->fim_workspace,
-                   ssm->output_dim, ssm->damping);
-    block_fim_solve(ssm, ssm->D_fim, ssm->D_grad, ssm->fim_workspace,
-                   ssm->output_dim, ssm->damping);
+    block_fim_solve(ssm, ssm->A_fim, ssm->A_grad, ssm->state_dim);
+    block_fim_solve(ssm, ssm->B_fim, ssm->B_grad, ssm->input_dim);
+    block_fim_solve(ssm, ssm->C_fim, ssm->C_grad, ssm->output_dim);
+    block_fim_solve(ssm, ssm->D_fim, ssm->D_grad, ssm->output_dim);
     
     // Apply updates with weight decay
     #define UPDATE_MATRIX(W, W_grad, size) do { \
