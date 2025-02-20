@@ -103,14 +103,14 @@ int main() {
              localtime(&now));
 
     // Save model and data
-    save_model(ssm, model_fname);
+    save_ssm(ssm, model_fname);
     save_data_to_csv(h_X, h_y, num_samples, input_dim, output_dim, data_fname);
     
     // Model Evaluation
     printf("\nModel Evaluation\n");
     printf("================\n");
 
-    SSM* loaded_ssm = load_model(model_fname);
+    SSM* loaded_ssm = load_ssm(model_fname);
     float* h_predictions = (float*)malloc(num_samples * output_dim * sizeof(float));
     
     // Generate predictions for all samples

@@ -283,7 +283,7 @@ void update_weights(SSM* ssm, float learning_rate) {
     #undef UPDATE_MATRIX
 }
 
-void save_model(SSM* ssm, const char* filename) {
+void save_ssm(SSM* ssm, const char* filename) {
     FILE* file = fopen(filename, "wb");
     if (!file) {
         printf("Error opening file for writing: %s\n", filename);
@@ -314,7 +314,7 @@ void save_model(SSM* ssm, const char* filename) {
     printf("Model saved to %s\n", filename);
 }
 
-SSM* load_model(const char* filename) {
+SSM* load_ssm(const char* filename) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
         printf("Error opening file for reading: %s\n", filename);

@@ -496,7 +496,7 @@ void free_ssm(SSM* ssm) {
 // Function: save_model
 // Saves the model weights to a binary file.
 // ---------------------------------------------------------------------
-void save_model(SSM* ssm, const char* filename) {
+void save_ssm(SSM* ssm, const char* filename) {
     FILE* file = fopen(filename, "wb");
     if (!file) {
         printf("Error opening file for writing: %s\n", filename);
@@ -545,7 +545,7 @@ void save_model(SSM* ssm, const char* filename) {
 // Function: load_model
 // Loads the model weights from a binary file and initializes a new SSM.
 // ---------------------------------------------------------------------
-SSM* load_model(const char* filename) {
+SSM* load_ssm(const char* filename) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
         printf("Error opening file for reading: %s\n", filename);
