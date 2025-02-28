@@ -75,6 +75,9 @@ int main() {
                 
                 // Update weights
                 ssm_update_weights(ssm, learning_rate);
+                        
+                // Apply spectral normalization to A matrix periodically
+                if (ssm->adam_t % 500 == 0) apply_spectral_normalization(ssm);
             }
         }
         

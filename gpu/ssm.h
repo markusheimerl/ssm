@@ -561,9 +561,6 @@ void update_weights(SSM* ssm, float learning_rate) {
         ssm->d_D, ssm->d_D_grad, ssm->d_D_m, ssm->d_D_v,
         size_D, ssm->beta1, ssm->beta2, ssm->epsilon, ssm->weight_decay,
         learning_rate, ssm->batch_size, bias_correction1, bias_correction2);
-        
-    // Apply spectral normalization to A matrix periodically
-    if (ssm->adam_t % 1000 == 0) apply_spectral_normalization(ssm);
 }
 
 // ---------------------------------------------------------------------
