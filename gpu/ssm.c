@@ -34,8 +34,8 @@ int main() {
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, batch_size);
     
     // Training parameters
-    const int num_epochs = 1000;
-    const float learning_rate = 0.001f;
+    const int num_epochs = 10000;
+    const float learning_rate = 0.0001f;
     
     // Allocate memory for batch data on GPU
     float *d_batch_X, *d_batch_y;
