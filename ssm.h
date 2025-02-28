@@ -9,10 +9,11 @@
 
 typedef struct {
     // State transition matrices
-    float* A;  // state_dim x state_dim
-    float* B;  // state_dim x input_dim
-    float* C;  // output_dim x state_dim
-    float* D;  // output_dim x input_dim
+    float* A;          // state_dim x state_dim (raw parameters)
+    float* A_stable;   // state_dim x state_dim (stabilized version for computation)
+    float* B;          // state_dim x input_dim
+    float* C;          // output_dim x state_dim
+    float* D;          // output_dim x input_dim
 
     // Gradients
     float* A_grad;
@@ -50,16 +51,51 @@ typedef struct {
     int batch_size;
 } SSM;
 
-void ssm_swish_forward(float* x, int size) {
-    for (int i = 0; i < size; i++) {
-        x[i] = x[i] / (1.0f + expf(-x[i]));
+// Compute stable A matrix using tanh parameterization (same as GPU)
+void compute_stable_A(float* A_stable, const float* A, int n) {
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            int idx = i * n + j;
+            if (i == j) {
+                // Diagonal elements: scaled tanh for eigenvalue control
+                A_stable[idx] = 0.9f * tanhf(A[idx]);
+            } else {
+                // Off-diagonal elements: scaled by matrix size
+                A_stable[idx] = A[idx] / sqrtf((float)n);
+            }
+        }
     }
 }
 
-void ssm_swish_backward(float* grad_output, float* x, int size) {
+// Compute gradient for A from gradient of A_stable (same as GPU)
+void compute_A_grad_from_stable_grad(float* A_grad, const float* A_stable_grad, const float* A, int n) {
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            int idx = i * n + j;
+            if (i == j) {
+                // Diagonal derivative: d(tanh)/dA = sech²(A)
+                float tanh_val = tanhf(A[idx]);
+                float sech_squared = 1.0f - tanh_val * tanh_val;
+                A_grad[idx] = A_stable_grad[idx] * 0.9f * sech_squared;
+            } else {
+                // Off-diagonal derivative: 1/sqrt(n)
+                A_grad[idx] = A_stable_grad[idx] / sqrtf((float)n);
+            }
+        }
+    }
+}
+
+void ssm_swish_forward(float* x, int size) {
     for (int i = 0; i < size; i++) {
         float sigmoid = 1.0f / (1.0f + expf(-x[i]));
-        float swish = x[i] * sigmoid;
+        x[i] = x[i] * sigmoid;
+    }
+}
+
+void ssm_swish_backward(float* grad_output, float* x, float* activated, int size) {
+    for (int i = 0; i < size; i++) {
+        float sigmoid = 1.0f / (1.0f + expf(-x[i]));
+        float swish = activated[i];
         grad_output[i] *= (swish + sigmoid * (1.0f - swish));
     }
 }
@@ -82,6 +118,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     
     // Allocate matrices
     ssm->A = (float*)malloc(state_dim * state_dim * sizeof(float));
+    ssm->A_stable = (float*)malloc(state_dim * state_dim * sizeof(float));
     ssm->B = (float*)malloc(state_dim * input_dim * sizeof(float));
     ssm->C = (float*)malloc(output_dim * state_dim * sizeof(float));
     ssm->D = (float*)malloc(output_dim * input_dim * sizeof(float));
@@ -111,7 +148,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     ssm->state_error = (float*)malloc(batch_size * state_dim * sizeof(float));
     
     // Initialize matrices with scaled random values
-    float scale_A = 1.0f / sqrtf(state_dim);
+    float scale_A = 0.1f; // Small initialization for A (similar to GPU)
     float scale_B = 1.0f / sqrtf(input_dim);
     float scale_C = 1.0f / sqrtf(state_dim);
     float scale_D = 1.0f / sqrtf(input_dim);
@@ -129,11 +166,15 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
         ssm->D[i] = ((float)rand() / (float)RAND_MAX * 2 - 1) * scale_D;
     }
     
+    // Compute initial stable A
+    compute_stable_A(ssm->A_stable, ssm->A, state_dim);
+    
     return ssm;
 }
 
 void free_ssm(SSM* ssm) {
     free(ssm->A);
+    free(ssm->A_stable);
     free(ssm->B);
     free(ssm->C);
     free(ssm->D);
@@ -159,12 +200,15 @@ void free_ssm(SSM* ssm) {
 }
 
 void ssm_forward_pass(SSM* ssm, float* X) {
-    // Next state: x[t+1] = f(Ax[t] + Bu[t]) where f is swish activation
-    // State update from A
+    // Compute stabilized A matrix
+    compute_stable_A(ssm->A_stable, ssm->A, ssm->state_dim);
+    
+    // Next state: x[t+1] = f(A_stable*x[t] + Bu[t]) where f is swish activation
+    // State update from A_stable
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 ssm->batch_size, ssm->state_dim, ssm->state_dim,
                 1.0f, ssm->state, ssm->state_dim,
-                ssm->A, ssm->state_dim,
+                ssm->A_stable, ssm->state_dim,
                 0.0f, ssm->pre_state, ssm->state_dim);
     
     // Add input contribution from B
@@ -174,9 +218,11 @@ void ssm_forward_pass(SSM* ssm, float* X) {
                 ssm->B, ssm->state_dim,
                 1.0f, ssm->pre_state, ssm->state_dim);
     
-    // Apply non-linearity to state
+    // Copy pre-activation for backward pass
     memcpy(ssm->next_state, ssm->pre_state, 
            ssm->batch_size * ssm->state_dim * sizeof(float));
+    
+    // Apply non-linearity to state
     ssm_swish_forward(ssm->next_state, ssm->batch_size * ssm->state_dim);
     
     // Output: y[t] = Cf(x[t]) + Du[t]
@@ -215,44 +261,52 @@ void ssm_zero_gradients(SSM* ssm) {
 }
 
 void ssm_backward_pass(SSM* ssm, float* X) {
-    // Gradient for C: ∂L/∂C = (∂L/∂y)f(x)ᵀ
+    float* A_stable_grad = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
+    memset(A_stable_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float));
+    
+    // Gradient for C: ∂L/∂C = (∂L/∂y)(next_state)ᵀ
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                 ssm->state_dim, ssm->output_dim, ssm->batch_size,
-                1.0f, ssm->state, ssm->state_dim,
+                1.0f, ssm->next_state, ssm->state_dim,
                 ssm->error, ssm->output_dim,
                 1.0f, ssm->C_grad, ssm->output_dim);
     
-    // Gradient for D: ∂L/∂D = (∂L/∂y)uᵀ
+    // Gradient for D: ∂L/∂D = (∂L/∂y)Xᵀ
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                 ssm->input_dim, ssm->output_dim, ssm->batch_size,
                 1.0f, X, ssm->input_dim,
                 ssm->error, ssm->output_dim,
                 1.0f, ssm->D_grad, ssm->output_dim);
     
-    // State error: ∂L/∂f(x) = (∂L/∂y)Cᵀ
+    // State error: ∂L/∂next_state = (∂L/∂y)Cᵀ
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 ssm->batch_size, ssm->state_dim, ssm->output_dim,
                 1.0f, ssm->error, ssm->output_dim,
                 ssm->C, ssm->output_dim,
                 0.0f, ssm->state_error, ssm->state_dim);
     
-    // Apply activation gradient
-    ssm_swish_backward(ssm->state_error, ssm->pre_state, 
+    // Apply activation gradient through swish
+    ssm_swish_backward(ssm->state_error, ssm->pre_state, ssm->next_state,
                   ssm->batch_size * ssm->state_dim);
     
-    // Gradient for A: ∂L/∂A = xᵀ(∂L/∂z)
+    // Gradient for A_stable: ∂L/∂A_stable = stateᵀ(∂L/∂pre_state)
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                 ssm->state_dim, ssm->state_dim, ssm->batch_size,
                 1.0f, ssm->state, ssm->state_dim,
                 ssm->state_error, ssm->state_dim,
-                1.0f, ssm->A_grad, ssm->state_dim);
+                0.0f, A_stable_grad, ssm->state_dim);
     
-    // Gradient for B: ∂L/∂B = uᵀ(∂L/∂z)
+    // Convert A_stable gradient to A gradient
+    compute_A_grad_from_stable_grad(ssm->A_grad, A_stable_grad, ssm->A, ssm->state_dim);
+    
+    // Gradient for B: ∂L/∂B = Xᵀ(∂L/∂pre_state)
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                 ssm->input_dim, ssm->state_dim, ssm->batch_size,
                 1.0f, X, ssm->input_dim,
                 ssm->state_error, ssm->state_dim,
                 1.0f, ssm->B_grad, ssm->state_dim);
+    
+    free(A_stable_grad);
 }
 
 void ssm_update_weights(SSM* ssm, float learning_rate) {
@@ -281,6 +335,9 @@ void ssm_update_weights(SSM* ssm, float learning_rate) {
                  ssm->output_dim * ssm->input_dim);
     
     #undef UPDATE_MATRIX
+    
+    // Update A_stable after modifying A
+    compute_stable_A(ssm->A_stable, ssm->A, ssm->state_dim);
 }
 
 void save_ssm(SSM* ssm, const char* filename) {
@@ -343,6 +400,9 @@ SSM* load_ssm(const char* filename) {
     fread(ssm->C_v, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D_m, sizeof(float), output_dim * input_dim, file);
     fread(ssm->D_v, sizeof(float), output_dim * input_dim, file);
+    
+    // Compute stable A matrix after loading
+    compute_stable_A(ssm->A_stable, ssm->A, state_dim);
     
     fclose(file);
     printf("Model loaded from %s\n", filename);

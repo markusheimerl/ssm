@@ -45,7 +45,7 @@ $$
 \rho(A) = \max_{i} |\lambda_i| < 1
 $$
 
-where $\lambda_i$ are the eigenvalues of $A$. The implementation includes stability analysis through power iteration to estimate the spectral radius.
+where $\lambda_i$ are the eigenvalues of $A$.
 
 ## How to run
 ```

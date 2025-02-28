@@ -26,8 +26,8 @@ int main() {
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, batch_size);
     
     // Training parameters
-    const int num_epochs = 1000;
-    const float learning_rate = 0.001f;
+    const int num_epochs = 10000;
+    const float learning_rate = 0.0001f;
     
     // Allocate memory for batch data
     float* batch_X = (float*)malloc(batch_size * input_dim * sizeof(float));
@@ -75,9 +75,6 @@ int main() {
                 
                 // Update weights
                 ssm_update_weights(ssm, learning_rate);
-                        
-                // Apply spectral normalization to A matrix periodically
-                if (ssm->adam_t % 500 == 0) apply_spectral_normalization(ssm);
             }
         }
         

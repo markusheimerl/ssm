@@ -84,9 +84,6 @@ int main() {
                 
                 // Update weights
                 update_weights(ssm, learning_rate);
-
-                // Apply spectral normalization
-                if (ssm->adam_t % 500 == 0) apply_spectral_normalization(ssm);
             }
         }
         

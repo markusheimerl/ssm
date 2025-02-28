@@ -7,10 +7,9 @@
 #include <math.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
-#include <cusolverDn.h>
 
 // ---------------------------------------------------------------------
-// Error checking macros for CUDA, cuBLAS and cuSOLVER calls
+// Error checking macros for CUDA and cuBLAS calls
 // ---------------------------------------------------------------------
 #ifndef CHECK_CUDA
 #define CHECK_CUDA(call) do { \
@@ -34,20 +33,10 @@
 } while(0)
 #endif
 
-#ifndef CHECK_CUSOLVER
-#define CHECK_CUSOLVER(call) do { \
-    cusolverStatus_t status = call; \
-    if (status != CUSOLVER_STATUS_SUCCESS) { \
-        fprintf(stderr, "cuSOLVER error in %s at line %d: %d\n", \
-                __FILE__, __LINE__, status); \
-        exit(EXIT_FAILURE); \
-    } \
-} while(0)
-#endif
-
 // ---------------------------------------------------------------------
 // Structure definition for the state-space model (SSM)
-// This version uses cuBLAS with TF32 Tensor Cores and integrates the AdamW optimizer.
+// This version uses cuBLAS and integrates the AdamW optimizer.
+// Internally parameterizes A for stability.
 // ---------------------------------------------------------------------
 typedef struct {
     // State transition matrices (stored on device)
@@ -96,17 +85,10 @@ typedef struct {
     // Temporary buffers for matrix operations
     float* d_temp_state;    // batch_size x state_dim
     float* d_temp_output;   // batch_size x output_dim
-    
-    // Spectral normalization buffers
-    float* d_A_symm;        // state_dim x state_dim (for A^T*A)
-    float* d_eigenvalues;   // state_dim
-    float* d_work;          // work buffer for cuSOLVER
-    int work_size;          // size of work buffer
-    int* d_info;            // output info from cuSOLVER
+    float* d_A_stable;      // Internal stable version of A (I - exp(A))
     
     // CUDA library handles
     cublasHandle_t cublas_handle;
-    cusolverDnHandle_t cusolver_handle;
 
     // Dimensions of the network
     int input_dim;
@@ -114,6 +96,50 @@ typedef struct {
     int output_dim;
     int batch_size;
 } SSM;
+
+// ---------------------------------------------------------------------
+// CUDA kernel: Compute stable A matrix using tanh-based parameterization
+// ---------------------------------------------------------------------
+__global__ void compute_stable_A_kernel(float* A_stable, const float* A, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n*n) {
+        int row = idx / n;
+        int col = idx % n;
+        
+        if (row == col) {
+            // Diagonal elements: scaled tanh for eigenvalue control
+            // Maps R → (-1,1), ensuring stability with tanh(A)
+            A_stable[idx] = 0.9f * tanhf(A[idx]);
+        } else {
+            // Off-diagonal elements: scaled by matrix size
+            // This prevents off-diagonal dominance in large matrices
+            A_stable[idx] = A[idx] / sqrtf((float)n);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// CUDA kernel: Compute gradient for A analytically
+// ---------------------------------------------------------------------
+__global__ void compute_A_grad_from_stable_grad(float* A_grad, 
+                                               const float* A_stable_grad, 
+                                               const float* A, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n*n) {
+        int row = idx / n;
+        int col = idx % n;
+        
+        if (row == col) {
+            // Diagonal derivative: d(tanh)/dA = sech²(A)
+            float tanh_val = tanhf(A[idx]);
+            float sech_squared = 1.0f - tanh_val * tanh_val;
+            A_grad[idx] = A_stable_grad[idx] * 0.9f * sech_squared;
+        } else {
+            // Off-diagonal derivative: 1/sqrt(n)
+            A_grad[idx] = A_stable_grad[idx] / sqrtf((float)n);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------
 // CUDA kernel: swish activation forward pass
@@ -133,7 +159,7 @@ __global__ void swish_forward_kernel(float* output, const float* input, int size
 // Computes derivative using: grad_output *= swish + sigmoid*(1-swish)
 // ---------------------------------------------------------------------
 __global__ void swish_backward_kernel(float* grad_output, const float* input, 
-                                        const float* activated, int size) {
+                                     const float* activated, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float x = input[idx];
@@ -147,7 +173,7 @@ __global__ void swish_backward_kernel(float* grad_output, const float* input,
 // CUDA kernel: Mean Squared Error loss computation (elementwise error)
 // ---------------------------------------------------------------------
 __global__ void mse_loss_kernel(float* error, const float* predictions, 
-                                const float* targets, int size) {
+                               const float* targets, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float diff = predictions[idx] - targets[idx];
@@ -159,9 +185,9 @@ __global__ void mse_loss_kernel(float* error, const float* predictions,
 // CUDA kernel: AdamW update (per weight element)
 // ---------------------------------------------------------------------
 __global__ void adamw_update_kernel(float* W, const float* grad, float* m, float* v, 
-                                      int size, float beta1, float beta2, float epsilon, 
-                                      float weight_decay, float learning_rate, int batch_size, 
-                                      float bias_correction1, float bias_correction2) {
+                                   int size, float beta1, float beta2, float epsilon, 
+                                   float weight_decay, float learning_rate, int batch_size, 
+                                   float bias_correction1, float bias_correction2) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float g = grad[idx] / ((float) batch_size);
@@ -170,54 +196,6 @@ __global__ void adamw_update_kernel(float* W, const float* grad, float* m, float
         float m_hat = m[idx] / bias_correction1;
         float v_hat = v[idx] / bias_correction2;
         W[idx] = W[idx] * (1.0f - learning_rate * weight_decay) - learning_rate * (m_hat / (sqrtf(v_hat) + epsilon));
-    }
-}
-
-// ---------------------------------------------------------------------
-// Function: apply_spectral_normalization
-// Normalizes matrix A to have spectral radius <= 0.999 using eigendecomposition
-// ---------------------------------------------------------------------
-void apply_spectral_normalization(SSM* ssm) {
-    int n = ssm->state_dim;
-    const float target_radius = 0.999f;
-    const float alpha = 1.0f, beta = 0.0f;
-    
-    // Compute A^T * A (symmetric matrix with same singular values as A)
-    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                              n, n, n, &alpha, ssm->d_A, CUDA_R_32F, n,
-                              ssm->d_A, CUDA_R_32F, n, &beta,
-                              ssm->d_A_symm, CUDA_R_32F, n,
-                              CUBLAS_COMPUTE_32F_FAST_TF32,
-                              CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-    
-    // Compute eigenvalues of A^T * A
-    CHECK_CUSOLVER(cusolverDnSsyevd(
-        ssm->cusolver_handle,
-        CUSOLVER_EIG_MODE_NOVECTOR,  // Only compute eigenvalues
-        CUBLAS_FILL_MODE_LOWER,      // Use lower triangular part
-        n, ssm->d_A_symm, n, ssm->d_eigenvalues,
-        ssm->d_work, ssm->work_size, ssm->d_info));
-    
-    // Check for error (optional since we pre-allocated everything)
-    int info = 0;
-    CHECK_CUDA(cudaMemcpy(&info, ssm->d_info, sizeof(int), cudaMemcpyDeviceToHost));
-    if (info != 0) {
-        fprintf(stderr, "Warning: Eigenvalue computation returned %d\n", info);
-        return;
-    }
-    
-    // Get largest eigenvalue (last one, they're sorted in ascending order)
-    float max_eigenvalue;
-    CHECK_CUDA(cudaMemcpy(&max_eigenvalue, &ssm->d_eigenvalues[n-1], 
-                          sizeof(float), cudaMemcpyDeviceToHost));
-    
-    // Compute spectral radius (square root of largest eigenvalue of A^T * A)
-    float spectral_radius = sqrtf(max_eigenvalue);
-    
-    // If spectral radius > 1.0, scale down matrix A
-    if (spectral_radius > target_radius) {
-        float scale_factor = target_radius / spectral_radius;
-        CHECK_CUBLAS(cublasSscal(ssm->cublas_handle, n * n, &scale_factor, ssm->d_A, 1));
     }
 }
 
@@ -243,12 +221,6 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
 
     // Create cuBLAS handle
     CHECK_CUBLAS(cublasCreate(&ssm->cublas_handle));
-    
-    // Enable TF32 tensor core math mode in cuBLAS
-    CHECK_CUBLAS(cublasSetMathMode(ssm->cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH));
-    
-    // Create cuSOLVER handle for spectral normalization
-    CHECK_CUSOLVER(cusolverDnCreate(&ssm->cusolver_handle));
 
     // Allocate host memory for weight matrices
     ssm->h_A = (float*)malloc(state_dim * state_dim * sizeof(float));
@@ -317,19 +289,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     // Allocate temporary buffers
     CHECK_CUDA(cudaMalloc(&ssm->d_temp_state, batch_size * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_temp_output, batch_size * output_dim * sizeof(float)));
-    
-    // Allocate spectral normalization resources
-    CHECK_CUDA(cudaMalloc(&ssm->d_A_symm, state_dim * state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_eigenvalues, state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_info, sizeof(int)));
-    
-    // Get workspace size for eigenvalue computation
-    CHECK_CUSOLVER(cusolverDnSsyevd_bufferSize(
-        ssm->cusolver_handle, CUSOLVER_EIG_MODE_NOVECTOR, CUBLAS_FILL_MODE_LOWER,
-        state_dim, ssm->d_A_symm, state_dim, ssm->d_eigenvalues, &ssm->work_size));
-    
-    // Allocate workspace
-    CHECK_CUDA(cudaMalloc(&ssm->d_work, ssm->work_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_stable, state_dim * state_dim * sizeof(float)));
 
     // Copy weight matrices from host to device
     CHECK_CUDA(cudaMemcpy(ssm->d_A, ssm->h_A, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
@@ -340,16 +300,14 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     // Initialize state to zero
     CHECK_CUDA(cudaMemset(ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
     
-    // Apply spectral normalization to initial A matrix
-    apply_spectral_normalization(ssm);
-
     return ssm;
 }
 
 // ---------------------------------------------------------------------
 // Function: forward_pass
 // Computes the forward pass:
-//   pre_state = A * state + B * X
+//   Compute A_stable from A: A_stable = I - exp(A)
+//   pre_state = A_stable * state + B * X
 //   next_state = swish(pre_state)
 //   predictions = C * next_state + D * X
 // Updates the internal state to next_state.
@@ -357,60 +315,58 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
 void forward_pass(SSM* ssm, float* d_X) {
     const float alpha = 1.0f, beta = 0.0f;
 
-    // Compute pre_state = A * state
-    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                             ssm->state_dim, ssm->batch_size, ssm->state_dim,
-                             &alpha,
-                             ssm->d_A, CUDA_R_32F, ssm->state_dim,
-                             ssm->d_state, CUDA_R_32F, ssm->state_dim,
-                             &beta,
-                             ssm->d_pre_state, CUDA_R_32F, ssm->state_dim,
-                             CUBLAS_COMPUTE_32F_FAST_TF32,
-                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    // Compute stable A from A for this forward pass
+    int n = ssm->state_dim;
+    int block_size = 256;
+    int num_blocks = (n * n + block_size - 1) / block_size;
+    compute_stable_A_kernel<<<num_blocks, block_size>>>(ssm->d_A_stable, ssm->d_A, n);
+
+    // Compute pre_state = A_stable * state
+    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                            ssm->state_dim, ssm->batch_size, ssm->state_dim,
+                            &alpha,
+                            ssm->d_A_stable, ssm->state_dim,
+                            ssm->d_state, ssm->state_dim,
+                            &beta,
+                            ssm->d_pre_state, ssm->state_dim));
 
     // Add input contribution: pre_state += B * X
-    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                             ssm->state_dim, ssm->batch_size, ssm->input_dim,
-                             &alpha,
-                             ssm->d_B, CUDA_R_32F, ssm->state_dim,
-                             d_X, CUDA_R_32F, ssm->input_dim,
-                             &alpha, // Add to existing pre_state
-                             ssm->d_pre_state, CUDA_R_32F, ssm->state_dim,
-                             CUBLAS_COMPUTE_32F_FAST_TF32,
-                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                            ssm->state_dim, ssm->batch_size, ssm->input_dim,
+                            &alpha,
+                            ssm->d_B, ssm->state_dim,
+                            d_X, ssm->input_dim,
+                            &alpha, // Add to existing pre_state
+                            ssm->d_pre_state, ssm->state_dim));
 
     // Apply swish activation: next_state = swish(pre_state)
     int total_state = ssm->batch_size * ssm->state_dim;
-    int block_size = 256;
-    int num_blocks = (total_state + block_size - 1) / block_size;
+    block_size = 256;
+    num_blocks = (total_state + block_size - 1) / block_size;
     swish_forward_kernel<<<num_blocks, block_size>>>(ssm->d_next_state, ssm->d_pre_state, total_state);
     
     // Compute predictions = C * next_state
-    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                             ssm->output_dim, ssm->batch_size, ssm->state_dim,
-                             &alpha,
-                             ssm->d_C, CUDA_R_32F, ssm->output_dim,
-                             ssm->d_next_state, CUDA_R_32F, ssm->state_dim,
-                             &beta,
-                             ssm->d_predictions, CUDA_R_32F, ssm->output_dim,
-                             CUBLAS_COMPUTE_32F_FAST_TF32,
-                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                            ssm->output_dim, ssm->batch_size, ssm->state_dim,
+                            &alpha,
+                            ssm->d_C, ssm->output_dim,
+                            ssm->d_next_state, ssm->state_dim,
+                            &beta,
+                            ssm->d_predictions, ssm->output_dim));
                              
     // Add direct feedthrough: predictions += D * X
-    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                             ssm->output_dim, ssm->batch_size, ssm->input_dim,
-                             &alpha,
-                             ssm->d_D, CUDA_R_32F, ssm->output_dim,
-                             d_X, CUDA_R_32F, ssm->input_dim,
-                             &alpha, // Add to existing predictions
-                             ssm->d_predictions, CUDA_R_32F, ssm->output_dim,
-                             CUBLAS_COMPUTE_32F_FAST_TF32,
-                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                            ssm->output_dim, ssm->batch_size, ssm->input_dim,
+                            &alpha,
+                            ssm->d_D, ssm->output_dim,
+                            d_X, ssm->input_dim,
+                            &alpha, // Add to existing predictions
+                            ssm->d_predictions, ssm->output_dim));
     
     // Update internal state: state = next_state
     CHECK_CUDA(cudaMemcpy(ssm->d_state, ssm->d_next_state,
-                          ssm->batch_size * ssm->state_dim * sizeof(float),
-                          cudaMemcpyDeviceToDevice));
+                         ssm->batch_size * ssm->state_dim * sizeof(float),
+                         cudaMemcpyDeviceToDevice));
 }
 
 // ---------------------------------------------------------------------
@@ -424,9 +380,9 @@ float calculate_loss(SSM* ssm, float* d_y) {
     mse_loss_kernel<<<num_blocks, block_size>>>(ssm->d_error, ssm->d_predictions, d_y, size);
     float loss = 0.0f;
     CHECK_CUBLAS(cublasSdot(ssm->cublas_handle, size,
-                            ssm->d_error, 1,
-                            ssm->d_error, 1,
-                            &loss));
+                           ssm->d_error, 1,
+                           ssm->d_error, 1,
+                           &loss));
     return loss / size;
 }
 
@@ -451,80 +407,76 @@ void zero_gradients(SSM* ssm) {
 //   dC_grad = error * (next_state)^T
 //   dD_grad = error * (input)^T
 //   state_error = C^T * error (back-propagated through output)
-// Then applies swish backward to state_error and computes gradients for A and B.
+// Then applies swish backward to state_error and computes gradients.
 // ---------------------------------------------------------------------
 void backward_pass(SSM* ssm, float* d_X) {
     const float alpha = 1.0f, beta = 0.0f;
 
     // Gradient for C: d_C_grad = error * (next_state)^T
-    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
-                             ssm->output_dim, ssm->state_dim, ssm->batch_size,
-                             &alpha,
-                             ssm->d_error, CUDA_R_32F, ssm->output_dim,
-                             ssm->d_next_state, CUDA_R_32F, ssm->state_dim,
-                             &beta,
-                             ssm->d_C_grad, CUDA_R_32F, ssm->output_dim,
-                             CUBLAS_COMPUTE_32F_FAST_TF32,
-                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                            ssm->output_dim, ssm->state_dim, ssm->batch_size,
+                            &alpha,
+                            ssm->d_error, ssm->output_dim,
+                            ssm->d_next_state, ssm->state_dim,
+                            &beta,
+                            ssm->d_C_grad, ssm->output_dim));
                              
     // Gradient for D: d_D_grad = error * (X)^T
-    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
-                             ssm->output_dim, ssm->input_dim, ssm->batch_size,
-                             &alpha,
-                             ssm->d_error, CUDA_R_32F, ssm->output_dim,
-                             d_X, CUDA_R_32F, ssm->input_dim,
-                             &beta,
-                             ssm->d_D_grad, CUDA_R_32F, ssm->output_dim,
-                             CUBLAS_COMPUTE_32F_FAST_TF32,
-                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                            ssm->output_dim, ssm->input_dim, ssm->batch_size,
+                            &alpha,
+                            ssm->d_error, ssm->output_dim,
+                            d_X, ssm->input_dim,
+                            &beta,
+                            ssm->d_D_grad, ssm->output_dim));
                              
     // Compute state error: state_error = C^T * error
-    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                             ssm->state_dim, ssm->batch_size, ssm->output_dim,
-                             &alpha,
-                             ssm->d_C, CUDA_R_32F, ssm->output_dim,
-                             ssm->d_error, CUDA_R_32F, ssm->output_dim,
-                             &beta,
-                             ssm->d_state_error, CUDA_R_32F, ssm->state_dim,
-                             CUBLAS_COMPUTE_32F_FAST_TF32,
-                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                            ssm->state_dim, ssm->batch_size, ssm->output_dim,
+                            &alpha,
+                            ssm->d_C, ssm->output_dim,
+                            ssm->d_error, ssm->output_dim,
+                            &beta,
+                            ssm->d_state_error, ssm->state_dim));
                              
     // Apply swish backward: modify state_error in place
     int total_state = ssm->batch_size * ssm->state_dim;
     int block_size = 256;
     int num_blocks = (total_state + block_size - 1) / block_size;
     swish_backward_kernel<<<num_blocks, block_size>>>(ssm->d_state_error, 
-                                                      ssm->d_pre_state, 
-                                                      ssm->d_next_state, 
-                                                      total_state);
+                                                     ssm->d_pre_state, 
+                                                     ssm->d_next_state, 
+                                                     total_state);
                                                       
-    // Gradient for A: d_A_grad = state_error * (state)^T
-    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
-                             ssm->state_dim, ssm->state_dim, ssm->batch_size,
-                             &alpha,
-                             ssm->d_state_error, CUDA_R_32F, ssm->state_dim,
-                             ssm->d_state, CUDA_R_32F, ssm->state_dim,
-                             &beta,
-                             ssm->d_A_grad, CUDA_R_32F, ssm->state_dim,
-                             CUBLAS_COMPUTE_32F_FAST_TF32,
-                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    // First compute gradient for A_stable: temp = state_error * (state)^T
+    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                            ssm->state_dim, ssm->state_dim, ssm->batch_size,
+                            &alpha,
+                            ssm->d_state_error, ssm->state_dim,
+                            ssm->d_state, ssm->state_dim,
+                            &beta,
+                            ssm->d_A_stable, ssm->state_dim));
+                             
+    // Convert A_stable gradient to A gradient
+    int size_A = ssm->state_dim * ssm->state_dim;
+    block_size = 256;
+    num_blocks = (size_A + block_size - 1) / block_size;
+    compute_A_grad_from_stable_grad<<<num_blocks, block_size>>>(
+        ssm->d_A_grad, ssm->d_A_stable, ssm->d_A, ssm->state_dim);
                              
     // Gradient for B: d_B_grad = state_error * (X)^T
-    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
-                             ssm->state_dim, ssm->input_dim, ssm->batch_size,
-                             &alpha,
-                             ssm->d_state_error, CUDA_R_32F, ssm->state_dim,
-                             d_X, CUDA_R_32F, ssm->input_dim,
-                             &beta,
-                             ssm->d_B_grad, CUDA_R_32F, ssm->state_dim,
-                             CUBLAS_COMPUTE_32F_FAST_TF32,
-                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                            ssm->state_dim, ssm->input_dim, ssm->batch_size,
+                            &alpha,
+                            ssm->d_state_error, ssm->state_dim,
+                            d_X, ssm->input_dim,
+                            &beta,
+                            ssm->d_B_grad, ssm->state_dim));
 }
 
 // ---------------------------------------------------------------------
 // Function: update_weights
-// Uses the AdamW optimizer to update each weight matrix and applies
-// spectral normalization to A periodically to ensure stability.
+// Uses the AdamW optimizer to update each weight matrix
 // ---------------------------------------------------------------------
 void update_weights(SSM* ssm, float learning_rate) {
     ssm->adam_t++; // Increment time step
@@ -593,12 +545,7 @@ void free_ssm(SSM* ssm) {
     cudaFree(ssm->d_state_error);
     cudaFree(ssm->d_temp_state);
     cudaFree(ssm->d_temp_output);
-    
-    // Free spectral normalization resources
-    cudaFree(ssm->d_A_symm);
-    cudaFree(ssm->d_eigenvalues);
-    cudaFree(ssm->d_work);
-    cudaFree(ssm->d_info);
+    cudaFree(ssm->d_A_stable);
 
     // Free host memory
     free(ssm->h_A);
@@ -606,9 +553,8 @@ void free_ssm(SSM* ssm) {
     free(ssm->h_C);
     free(ssm->h_D);
 
-    // Destroy handles
+    // Destroy handle
     cublasDestroy(ssm->cublas_handle);
-    cusolverDnDestroy(ssm->cusolver_handle);
 
     free(ssm);
 }
