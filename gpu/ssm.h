@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------
 // Error checking macros for CUDA and cuBLAS calls
 // ---------------------------------------------------------------------
+#ifndef CHECK_CUDA
 #define CHECK_CUDA(call) do { \
     cudaError_t err = call; \
     if (err != cudaSuccess) { \
@@ -19,7 +20,9 @@
         exit(EXIT_FAILURE); \
     } \
 } while(0)
+#endif
 
+#ifndef CHECK_CUBLAS
 #define CHECK_CUBLAS(call) do { \
     cublasStatus_t status = call; \
     if (status != CUBLAS_STATUS_SUCCESS) { \
@@ -28,6 +31,7 @@
         exit(EXIT_FAILURE); \
     } \
 } while(0)
+#endif
 
 // ---------------------------------------------------------------------
 // Structure definition for the state-space model (SSM)
