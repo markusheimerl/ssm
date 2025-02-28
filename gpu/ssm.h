@@ -7,9 +7,10 @@
 #include <math.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include <cusolverDn.h>
 
 // ---------------------------------------------------------------------
-// Error checking macros for CUDA and cuBLAS calls
+// Error checking macros for CUDA, cuBLAS and cuSOLVER calls
 // ---------------------------------------------------------------------
 #ifndef CHECK_CUDA
 #define CHECK_CUDA(call) do { \
@@ -27,6 +28,17 @@
     cublasStatus_t status = call; \
     if (status != CUBLAS_STATUS_SUCCESS) { \
         fprintf(stderr, "cuBLAS error in %s at line %d: %d\n", \
+                __FILE__, __LINE__, status); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+#endif
+
+#ifndef CHECK_CUSOLVER
+#define CHECK_CUSOLVER(call) do { \
+    cusolverStatus_t status = call; \
+    if (status != CUSOLVER_STATUS_SUCCESS) { \
+        fprintf(stderr, "cuSOLVER error in %s at line %d: %d\n", \
                 __FILE__, __LINE__, status); \
         exit(EXIT_FAILURE); \
     } \
@@ -84,9 +96,17 @@ typedef struct {
     // Temporary buffers for matrix operations
     float* d_temp_state;    // batch_size x state_dim
     float* d_temp_output;   // batch_size x output_dim
-
-    // cuBLAS handle
+    
+    // Spectral normalization buffers
+    float* d_A_symm;        // state_dim x state_dim (for A^T*A)
+    float* d_eigenvalues;   // state_dim
+    float* d_work;          // work buffer for cuSOLVER
+    int work_size;          // size of work buffer
+    int* d_info;            // output info from cuSOLVER
+    
+    // CUDA library handles
     cublasHandle_t cublas_handle;
+    cusolverDnHandle_t cusolver_handle;
 
     // Dimensions of the network
     int input_dim;
@@ -137,15 +157,6 @@ __global__ void mse_loss_kernel(float* error, const float* predictions,
 
 // ---------------------------------------------------------------------
 // CUDA kernel: AdamW update (per weight element)
-// Updates the first and second moment estimates and adjusts the weight.
-// Adam update equations:
-//   m = beta1 * m + (1 - beta1) * (grad / batch_size)
-//   v = beta2 * v + (1 - beta2) * (grad / batch_size)^2
-// Bias-corrected estimates:
-//   m_hat = m / (1 - beta1^t)
-//   v_hat = v / (1 - beta2^t)
-// Then update weight with decoupled weight decay:
-//   W = W * (1 - learning_rate * weight_decay) - learning_rate * (m_hat / (sqrt(v_hat) + epsilon))
 // ---------------------------------------------------------------------
 __global__ void adamw_update_kernel(float* W, const float* grad, float* m, float* v, 
                                       int size, float beta1, float beta2, float epsilon, 
@@ -159,6 +170,54 @@ __global__ void adamw_update_kernel(float* W, const float* grad, float* m, float
         float m_hat = m[idx] / bias_correction1;
         float v_hat = v[idx] / bias_correction2;
         W[idx] = W[idx] * (1.0f - learning_rate * weight_decay) - learning_rate * (m_hat / (sqrtf(v_hat) + epsilon));
+    }
+}
+
+// ---------------------------------------------------------------------
+// Function: apply_spectral_normalization
+// Normalizes matrix A to have spectral radius <= 0.999 using eigendecomposition
+// ---------------------------------------------------------------------
+void apply_spectral_normalization(SSM* ssm) {
+    int n = ssm->state_dim;
+    const float target_radius = 0.999f;
+    const float alpha = 1.0f, beta = 0.0f;
+    
+    // Compute A^T * A (symmetric matrix with same singular values as A)
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                              n, n, n, &alpha, ssm->d_A, CUDA_R_32F, n,
+                              ssm->d_A, CUDA_R_32F, n, &beta,
+                              ssm->d_A_symm, CUDA_R_32F, n,
+                              CUBLAS_COMPUTE_32F_FAST_TF32,
+                              CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    
+    // Compute eigenvalues of A^T * A
+    CHECK_CUSOLVER(cusolverDnSsyevd(
+        ssm->cusolver_handle,
+        CUSOLVER_EIG_MODE_NOVECTOR,  // Only compute eigenvalues
+        CUBLAS_FILL_MODE_LOWER,      // Use lower triangular part
+        n, ssm->d_A_symm, n, ssm->d_eigenvalues,
+        ssm->d_work, ssm->work_size, ssm->d_info));
+    
+    // Check for error (optional since we pre-allocated everything)
+    int info = 0;
+    CHECK_CUDA(cudaMemcpy(&info, ssm->d_info, sizeof(int), cudaMemcpyDeviceToHost));
+    if (info != 0) {
+        fprintf(stderr, "Warning: Eigenvalue computation returned %d\n", info);
+        return;
+    }
+    
+    // Get largest eigenvalue (last one, they're sorted in ascending order)
+    float max_eigenvalue;
+    CHECK_CUDA(cudaMemcpy(&max_eigenvalue, &ssm->d_eigenvalues[n-1], 
+                          sizeof(float), cudaMemcpyDeviceToHost));
+    
+    // Compute spectral radius (square root of largest eigenvalue of A^T * A)
+    float spectral_radius = sqrtf(max_eigenvalue);
+    
+    // If spectral radius > 1.0, scale down matrix A
+    if (spectral_radius > target_radius) {
+        float scale_factor = target_radius / spectral_radius;
+        CHECK_CUBLAS(cublasSscal(ssm->cublas_handle, n * n, &scale_factor, ssm->d_A, 1));
     }
 }
 
@@ -187,6 +246,9 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     
     // Enable TF32 tensor core math mode in cuBLAS
     CHECK_CUBLAS(cublasSetMathMode(ssm->cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH));
+    
+    // Create cuSOLVER handle for spectral normalization
+    CHECK_CUSOLVER(cusolverDnCreate(&ssm->cusolver_handle));
 
     // Allocate host memory for weight matrices
     ssm->h_A = (float*)malloc(state_dim * state_dim * sizeof(float));
@@ -255,12 +317,31 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     // Allocate temporary buffers
     CHECK_CUDA(cudaMalloc(&ssm->d_temp_state, batch_size * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_temp_output, batch_size * output_dim * sizeof(float)));
+    
+    // Allocate spectral normalization resources
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_symm, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_eigenvalues, state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_info, sizeof(int)));
+    
+    // Get workspace size for eigenvalue computation
+    CHECK_CUSOLVER(cusolverDnSsyevd_bufferSize(
+        ssm->cusolver_handle, CUSOLVER_EIG_MODE_NOVECTOR, CUBLAS_FILL_MODE_LOWER,
+        state_dim, ssm->d_A_symm, state_dim, ssm->d_eigenvalues, &ssm->work_size));
+    
+    // Allocate workspace
+    CHECK_CUDA(cudaMalloc(&ssm->d_work, ssm->work_size * sizeof(float)));
 
     // Copy weight matrices from host to device
     CHECK_CUDA(cudaMemcpy(ssm->d_A, ssm->h_A, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_B, ssm->h_B, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_C, ssm->h_C, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_D, ssm->h_D, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
+    
+    // Initialize state to zero
+    CHECK_CUDA(cudaMemset(ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
+    
+    // Apply spectral normalization to initial A matrix
+    apply_spectral_normalization(ssm);
 
     return ssm;
 }
@@ -442,7 +523,8 @@ void backward_pass(SSM* ssm, float* d_X) {
 
 // ---------------------------------------------------------------------
 // Function: update_weights
-// Uses the AdamW optimizer to update each weight matrix.
+// Uses the AdamW optimizer to update each weight matrix and applies
+// spectral normalization to A periodically to ensure stability.
 // ---------------------------------------------------------------------
 void update_weights(SSM* ssm, float learning_rate) {
     ssm->adam_t++; // Increment time step
@@ -479,6 +561,9 @@ void update_weights(SSM* ssm, float learning_rate) {
         ssm->d_D, ssm->d_D_grad, ssm->d_D_m, ssm->d_D_v,
         size_D, ssm->beta1, ssm->beta2, ssm->epsilon, ssm->weight_decay,
         learning_rate, ssm->batch_size, bias_correction1, bias_correction2);
+        
+    // Apply spectral normalization to A matrix periodically
+    if (ssm->adam_t % 1000 == 0) apply_spectral_normalization(ssm);
 }
 
 // ---------------------------------------------------------------------
@@ -511,6 +596,12 @@ void free_ssm(SSM* ssm) {
     cudaFree(ssm->d_state_error);
     cudaFree(ssm->d_temp_state);
     cudaFree(ssm->d_temp_output);
+    
+    // Free spectral normalization resources
+    cudaFree(ssm->d_A_symm);
+    cudaFree(ssm->d_eigenvalues);
+    cudaFree(ssm->d_work);
+    cudaFree(ssm->d_info);
 
     // Free host memory
     free(ssm->h_A);
@@ -518,8 +609,9 @@ void free_ssm(SSM* ssm) {
     free(ssm->h_C);
     free(ssm->h_D);
 
-    // Destroy cuBLAS handle
+    // Destroy handles
     cublasDestroy(ssm->cublas_handle);
+    cusolverDnDestroy(ssm->cusolver_handle);
 
     free(ssm);
 }
