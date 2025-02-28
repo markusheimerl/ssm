@@ -35,7 +35,7 @@
 
 // ---------------------------------------------------------------------
 // Structure definition for the state-space model (SSM)
-// This version uses cuBLAS and integrates the AdamW optimizer.
+// This version uses cuBLAS with TF32 Tensor Cores and integrates the AdamW optimizer.
 // ---------------------------------------------------------------------
 typedef struct {
     // State transition matrices (stored on device)
@@ -184,6 +184,9 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
 
     // Create cuBLAS handle
     CHECK_CUBLAS(cublasCreate(&ssm->cublas_handle));
+    
+    // Enable TF32 tensor core math mode in cuBLAS
+    CHECK_CUBLAS(cublasSetMathMode(ssm->cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH));
 
     // Allocate host memory for weight matrices
     ssm->h_A = (float*)malloc(state_dim * state_dim * sizeof(float));
@@ -274,22 +277,26 @@ void forward_pass(SSM* ssm, float* d_X) {
     const float alpha = 1.0f, beta = 0.0f;
 
     // Compute pre_state = A * state
-    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
                              ssm->state_dim, ssm->batch_size, ssm->state_dim,
                              &alpha,
-                             ssm->d_A, ssm->state_dim,
-                             ssm->d_state, ssm->state_dim,
+                             ssm->d_A, CUDA_R_32F, ssm->state_dim,
+                             ssm->d_state, CUDA_R_32F, ssm->state_dim,
                              &beta,
-                             ssm->d_pre_state, ssm->state_dim));
+                             ssm->d_pre_state, CUDA_R_32F, ssm->state_dim,
+                             CUBLAS_COMPUTE_32F_FAST_TF32,
+                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
 
     // Add input contribution: pre_state += B * X
-    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
                              ssm->state_dim, ssm->batch_size, ssm->input_dim,
                              &alpha,
-                             ssm->d_B, ssm->state_dim,
-                             d_X, ssm->input_dim,
-                             &alpha,
-                             ssm->d_pre_state, ssm->state_dim));
+                             ssm->d_B, CUDA_R_32F, ssm->state_dim,
+                             d_X, CUDA_R_32F, ssm->input_dim,
+                             &alpha, // Add to existing pre_state
+                             ssm->d_pre_state, CUDA_R_32F, ssm->state_dim,
+                             CUBLAS_COMPUTE_32F_FAST_TF32,
+                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
 
     // Apply swish activation: next_state = swish(pre_state)
     int total_state = ssm->batch_size * ssm->state_dim;
@@ -298,21 +305,26 @@ void forward_pass(SSM* ssm, float* d_X) {
     swish_forward_kernel<<<num_blocks, block_size>>>(ssm->d_next_state, ssm->d_pre_state, total_state);
     
     // Compute predictions = C * next_state
-    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
                              ssm->output_dim, ssm->batch_size, ssm->state_dim,
                              &alpha,
-                             ssm->d_C, ssm->output_dim,
-                             ssm->d_next_state, ssm->state_dim,
+                             ssm->d_C, CUDA_R_32F, ssm->output_dim,
+                             ssm->d_next_state, CUDA_R_32F, ssm->state_dim,
                              &beta,
-                             ssm->d_predictions, ssm->output_dim));
+                             ssm->d_predictions, CUDA_R_32F, ssm->output_dim,
+                             CUBLAS_COMPUTE_32F_FAST_TF32,
+                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+                             
     // Add direct feedthrough: predictions += D * X
-    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
                              ssm->output_dim, ssm->batch_size, ssm->input_dim,
                              &alpha,
-                             ssm->d_D, ssm->output_dim,
-                             d_X, ssm->input_dim,
-                             &alpha,
-                             ssm->d_predictions, ssm->output_dim));
+                             ssm->d_D, CUDA_R_32F, ssm->output_dim,
+                             d_X, CUDA_R_32F, ssm->input_dim,
+                             &alpha, // Add to existing predictions
+                             ssm->d_predictions, CUDA_R_32F, ssm->output_dim,
+                             CUBLAS_COMPUTE_32F_FAST_TF32,
+                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
     
     // Update internal state: state = next_state
     CHECK_CUDA(cudaMemcpy(ssm->d_state, ssm->d_next_state,
@@ -362,30 +374,40 @@ void zero_gradients(SSM* ssm) {
 // ---------------------------------------------------------------------
 void backward_pass(SSM* ssm, float* d_X) {
     const float alpha = 1.0f, beta = 0.0f;
+
     // Gradient for C: d_C_grad = error * (next_state)^T
-    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
                              ssm->output_dim, ssm->state_dim, ssm->batch_size,
                              &alpha,
-                             ssm->d_error, ssm->output_dim,
-                             ssm->d_next_state, ssm->state_dim,
+                             ssm->d_error, CUDA_R_32F, ssm->output_dim,
+                             ssm->d_next_state, CUDA_R_32F, ssm->state_dim,
                              &beta,
-                             ssm->d_C_grad, ssm->output_dim));
+                             ssm->d_C_grad, CUDA_R_32F, ssm->output_dim,
+                             CUBLAS_COMPUTE_32F_FAST_TF32,
+                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+                             
     // Gradient for D: d_D_grad = error * (X)^T
-    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
                              ssm->output_dim, ssm->input_dim, ssm->batch_size,
                              &alpha,
-                             ssm->d_error, ssm->output_dim,
-                             d_X, ssm->input_dim,
+                             ssm->d_error, CUDA_R_32F, ssm->output_dim,
+                             d_X, CUDA_R_32F, ssm->input_dim,
                              &beta,
-                             ssm->d_D_grad, ssm->output_dim));
+                             ssm->d_D_grad, CUDA_R_32F, ssm->output_dim,
+                             CUBLAS_COMPUTE_32F_FAST_TF32,
+                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+                             
     // Compute state error: state_error = C^T * error
-    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
                              ssm->state_dim, ssm->batch_size, ssm->output_dim,
                              &alpha,
-                             ssm->d_C, ssm->output_dim,
-                             ssm->d_error, ssm->output_dim,
+                             ssm->d_C, CUDA_R_32F, ssm->output_dim,
+                             ssm->d_error, CUDA_R_32F, ssm->output_dim,
                              &beta,
-                             ssm->d_state_error, ssm->state_dim));
+                             ssm->d_state_error, CUDA_R_32F, ssm->state_dim,
+                             CUBLAS_COMPUTE_32F_FAST_TF32,
+                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+                             
     // Apply swish backward: modify state_error in place
     int total_state = ssm->batch_size * ssm->state_dim;
     int block_size = 256;
@@ -394,22 +416,28 @@ void backward_pass(SSM* ssm, float* d_X) {
                                                       ssm->d_pre_state, 
                                                       ssm->d_next_state, 
                                                       total_state);
+                                                      
     // Gradient for A: d_A_grad = state_error * (state)^T
-    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
                              ssm->state_dim, ssm->state_dim, ssm->batch_size,
                              &alpha,
-                             ssm->d_state_error, ssm->state_dim,
-                             ssm->d_state, ssm->state_dim,
+                             ssm->d_state_error, CUDA_R_32F, ssm->state_dim,
+                             ssm->d_state, CUDA_R_32F, ssm->state_dim,
                              &beta,
-                             ssm->d_A_grad, ssm->state_dim));
+                             ssm->d_A_grad, CUDA_R_32F, ssm->state_dim,
+                             CUBLAS_COMPUTE_32F_FAST_TF32,
+                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+                             
     // Gradient for B: d_B_grad = state_error * (X)^T
-    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
                              ssm->state_dim, ssm->input_dim, ssm->batch_size,
                              &alpha,
-                             ssm->d_state_error, ssm->state_dim,
-                             d_X, ssm->input_dim,
+                             ssm->d_state_error, CUDA_R_32F, ssm->state_dim,
+                             d_X, CUDA_R_32F, ssm->input_dim,
                              &beta,
-                             ssm->d_B_grad, ssm->state_dim));
+                             ssm->d_B_grad, CUDA_R_32F, ssm->state_dim,
+                             CUBLAS_COMPUTE_32F_FAST_TF32,
+                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
 }
 
 // ---------------------------------------------------------------------
