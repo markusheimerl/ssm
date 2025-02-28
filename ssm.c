@@ -62,19 +62,19 @@ int main() {
                 }
                 
                 // Forward pass
-                forward_pass(ssm, batch_X);
+                ssm_forward_pass(ssm, batch_X);
                 
                 // Calculate loss
-                float loss = calculate_loss(ssm, batch_y);
+                float loss = ssm_calculate_loss(ssm, batch_y);
                 epoch_loss += loss;
                 num_batches++;
                 
                 // Backward pass
-                zero_gradients(ssm);
-                backward_pass(ssm, batch_X);
+                ssm_zero_gradients(ssm);
+                ssm_backward_pass(ssm, batch_X);
                 
                 // Update weights
-                update_weights(ssm, learning_rate);
+                ssm_update_weights(ssm, learning_rate);
             }
         }
         
@@ -115,7 +115,7 @@ int main() {
             memcpy(&batch_X[b * input_dim], &X[(i + b) * input_dim], input_dim * sizeof(float));
         }
         
-        forward_pass(loaded_ssm, batch_X);
+        ssm_forward_pass(loaded_ssm, batch_X);
         
         // Store predictions
         for (int b = 0; b < current_batch_size; b++) {

@@ -50,13 +50,13 @@ typedef struct {
     int batch_size;
 } SSM;
 
-void swish_forward(float* x, int size) {
+void ssm_swish_forward(float* x, int size) {
     for (int i = 0; i < size; i++) {
         x[i] = x[i] / (1.0f + expf(-x[i]));
     }
 }
 
-void swish_backward(float* grad_output, float* x, int size) {
+void ssm_swish_backward(float* grad_output, float* x, int size) {
     for (int i = 0; i < size; i++) {
         float sigmoid = 1.0f / (1.0f + expf(-x[i]));
         float swish = x[i] * sigmoid;
@@ -158,7 +158,7 @@ void free_ssm(SSM* ssm) {
     free(ssm);
 }
 
-void forward_pass(SSM* ssm, float* X) {
+void ssm_forward_pass(SSM* ssm, float* X) {
     // Next state: x[t+1] = f(Ax[t] + Bu[t]) where f is swish activation
     // State update from A
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -177,7 +177,7 @@ void forward_pass(SSM* ssm, float* X) {
     // Apply non-linearity to state
     memcpy(ssm->next_state, ssm->pre_state, 
            ssm->batch_size * ssm->state_dim * sizeof(float));
-    swish_forward(ssm->next_state, ssm->batch_size * ssm->state_dim);
+    ssm_swish_forward(ssm->next_state, ssm->batch_size * ssm->state_dim);
     
     // Output: y[t] = Cf(x[t]) + Du[t]
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -198,7 +198,7 @@ void forward_pass(SSM* ssm, float* X) {
            ssm->batch_size * ssm->state_dim * sizeof(float));
 }
 
-float calculate_loss(SSM* ssm, float* y) {
+float ssm_calculate_loss(SSM* ssm, float* y) {
     float loss = 0.0f;
     for (int i = 0; i < ssm->batch_size * ssm->output_dim; i++) {
         ssm->error[i] = ssm->predictions[i] - y[i];
@@ -207,14 +207,14 @@ float calculate_loss(SSM* ssm, float* y) {
     return loss / (ssm->batch_size * ssm->output_dim);
 }
 
-void zero_gradients(SSM* ssm) {
+void ssm_zero_gradients(SSM* ssm) {
     memset(ssm->A_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float));
     memset(ssm->B_grad, 0, ssm->state_dim * ssm->input_dim * sizeof(float));
     memset(ssm->C_grad, 0, ssm->output_dim * ssm->state_dim * sizeof(float));
     memset(ssm->D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(float));
 }
 
-void backward_pass(SSM* ssm, float* X) {
+void ssm_backward_pass(SSM* ssm, float* X) {
     // Gradient for C: ∂L/∂C = (∂L/∂y)f(x)ᵀ
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                 ssm->state_dim, ssm->output_dim, ssm->batch_size,
@@ -237,7 +237,7 @@ void backward_pass(SSM* ssm, float* X) {
                 0.0f, ssm->state_error, ssm->state_dim);
     
     // Apply activation gradient
-    swish_backward(ssm->state_error, ssm->pre_state, 
+    ssm_swish_backward(ssm->state_error, ssm->pre_state, 
                   ssm->batch_size * ssm->state_dim);
     
     // Gradient for A: ∂L/∂A = xᵀ(∂L/∂z)
@@ -255,7 +255,7 @@ void backward_pass(SSM* ssm, float* X) {
                 1.0f, ssm->B_grad, ssm->state_dim);
 }
 
-void update_weights(SSM* ssm, float learning_rate) {
+void ssm_update_weights(SSM* ssm, float learning_rate) {
     ssm->t++;
     float beta1_t = powf(ssm->beta1, ssm->t);
     float beta2_t = powf(ssm->beta2, ssm->t);
