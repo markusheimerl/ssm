@@ -85,7 +85,7 @@ typedef struct {
     // Temporary buffers for matrix operations
     float* d_temp_state;    // batch_size x state_dim
     float* d_temp_output;   // batch_size x output_dim
-    float* d_A_stable;      // Internal stable version of A (I - exp(A))
+    float* d_A_stable;      // Internal stable version of A
     
     // CUDA library handles
     cublasHandle_t cublas_handle;
@@ -108,11 +108,9 @@ __global__ void compute_stable_A_kernel(float* A_stable, const float* A, int n) 
         
         if (row == col) {
             // Diagonal elements: scaled tanh for eigenvalue control
-            // Maps R → (-1,1), ensuring stability with tanh(A)
             A_stable[idx] = 0.9f * tanhf(A[idx]);
         } else {
             // Off-diagonal elements: scaled by matrix size
-            // This prevents off-diagonal dominance in large matrices
             A_stable[idx] = A[idx] / sqrtf((float)n);
         }
     }
@@ -297,16 +295,13 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     CHECK_CUDA(cudaMemcpy(ssm->d_C, ssm->h_C, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_D, ssm->h_D, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     
-    // Initialize state to zero
-    CHECK_CUDA(cudaMemset(ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
-    
     return ssm;
 }
 
 // ---------------------------------------------------------------------
 // Function: forward_pass
 // Computes the forward pass:
-//   Compute A_stable from A: A_stable = I - exp(A)
+//   Compute A_stable from A
 //   pre_state = A_stable * state + B * X
 //   next_state = swish(pre_state)
 //   predictions = C * next_state + D * X

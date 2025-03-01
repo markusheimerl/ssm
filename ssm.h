@@ -9,8 +9,7 @@
 
 typedef struct {
     // State transition matrices
-    float* A;          // state_dim x state_dim (raw parameters)
-    float* A_stable;   // state_dim x state_dim (stabilized version for computation)
+    float* A;          // state_dim x state_dim
     float* B;          // state_dim x input_dim
     float* C;          // output_dim x state_dim
     float* D;          // output_dim x input_dim
@@ -37,12 +36,13 @@ typedef struct {
     float weight_decay;
 
     // Helper arrays
-    float* state;          // batch_size x state_dim
-    float* next_state;     // batch_size x state_dim
-    float* pre_state;      // batch_size x state_dim (pre-activation)
-    float* predictions;    // batch_size x output_dim
-    float* error;          // batch_size x output_dim
-    float* state_error;    // batch_size x state_dim
+    float* state;      // batch_size x state_dim
+    float* next_state; // batch_size x state_dim
+    float* pre_state;  // batch_size x state_dim (pre-activation)
+    float* predictions;// batch_size x output_dim
+    float* error;      // batch_size x output_dim
+    float* state_error;// batch_size x state_dim
+    float* A_stable;   // state_dim x state_dim
 
     // Dimensions
     int input_dim;
@@ -51,7 +51,7 @@ typedef struct {
     int batch_size;
 } SSM;
 
-// Compute stable A matrix using tanh parameterization (same as GPU)
+// Compute stable A matrix using tanh parameterization
 void compute_stable_A(float* A_stable, const float* A, int n) {
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
@@ -67,7 +67,7 @@ void compute_stable_A(float* A_stable, const float* A, int n) {
     }
 }
 
-// Compute gradient for A from gradient of A_stable (same as GPU)
+// Compute gradient for A from gradient of A_stable
 void compute_A_grad_from_stable_grad(float* A_grad, const float* A_stable_grad, const float* A, int n) {
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
@@ -118,7 +118,6 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     
     // Allocate matrices
     ssm->A = (float*)malloc(state_dim * state_dim * sizeof(float));
-    ssm->A_stable = (float*)malloc(state_dim * state_dim * sizeof(float));
     ssm->B = (float*)malloc(state_dim * input_dim * sizeof(float));
     ssm->C = (float*)malloc(output_dim * state_dim * sizeof(float));
     ssm->D = (float*)malloc(output_dim * input_dim * sizeof(float));
@@ -146,9 +145,10 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     ssm->predictions = (float*)malloc(batch_size * output_dim * sizeof(float));
     ssm->error = (float*)malloc(batch_size * output_dim * sizeof(float));
     ssm->state_error = (float*)malloc(batch_size * state_dim * sizeof(float));
-    
+    ssm->A_stable = (float*)malloc(state_dim * state_dim * sizeof(float));
+
     // Initialize matrices with scaled random values
-    float scale_A = 0.1f; // Small initialization for A (similar to GPU)
+    float scale_A = 1.0f / sqrtf(state_dim);
     float scale_B = 1.0f / sqrtf(input_dim);
     float scale_C = 1.0f / sqrtf(state_dim);
     float scale_D = 1.0f / sqrtf(input_dim);
@@ -165,9 +165,6 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
     for (int i = 0; i < output_dim * input_dim; i++) {
         ssm->D[i] = ((float)rand() / (float)RAND_MAX * 2 - 1) * scale_D;
     }
-    
-    // Compute initial stable A
-    compute_stable_A(ssm->A_stable, ssm->A, state_dim);
     
     return ssm;
 }
@@ -335,9 +332,6 @@ void ssm_update_weights(SSM* ssm, float learning_rate) {
                  ssm->output_dim * ssm->input_dim);
     
     #undef UPDATE_MATRIX
-    
-    // Update A_stable after modifying A
-    compute_stable_A(ssm->A_stable, ssm->A, ssm->state_dim);
 }
 
 void save_ssm(SSM* ssm, const char* filename) {
