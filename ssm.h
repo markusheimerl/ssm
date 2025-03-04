@@ -53,7 +53,7 @@ typedef struct {
     // Temporary buffers for matrix operations
     float* temp_state;    // batch_size x state_dim
     float* temp_output;   // batch_size x output_dim
-    float* A_stable;      // Internal stable version of A - used for both forward and backward
+    float* A_stable;      // Internal stable version of A
 
     // Dimensions of the network
     int input_dim;
@@ -357,7 +357,7 @@ void backward_pass(SSM* ssm, float* X) {
     int total_state = ssm->batch_size * ssm->state_dim;
     swish_backward(ssm->state_error, ssm->pre_state, ssm->next_state, total_state);
                                                       
-    // First compute gradient for A_stable: A_stable = state_error * (state)^T
+    // First compute gradient for A_stable: temp = state_error * (state)^T
     // Reuse A_stable buffer for storing this gradient temporarily
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                 ssm->state_dim, ssm->state_dim, ssm->batch_size,
@@ -409,7 +409,7 @@ void update_weights(SSM* ssm, float learning_rate) {
 
 // ---------------------------------------------------------------------
 // Function: free_ssm
-// Frees all allocated memory
+// Frees all allocated memory.
 // ---------------------------------------------------------------------
 void free_ssm(SSM* ssm) {
     // Free memory
@@ -458,12 +458,29 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(&ssm->state_dim, sizeof(int), 1, file);
     fwrite(&ssm->output_dim, sizeof(int), 1, file);
     fwrite(&ssm->batch_size, sizeof(int), 1, file);
+    
+    // Write Adam hyperparameters
+    fwrite(&ssm->beta1, sizeof(float), 1, file);
+    fwrite(&ssm->beta2, sizeof(float), 1, file);
+    fwrite(&ssm->epsilon, sizeof(float), 1, file);
+    fwrite(&ssm->weight_decay, sizeof(float), 1, file);
+    fwrite(&ssm->adam_t, sizeof(int), 1, file);
 
     // Write weight matrices to file
     fwrite(ssm->A, sizeof(float), ssm->state_dim * ssm->state_dim, file);
     fwrite(ssm->B, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(ssm->C, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(ssm->D, sizeof(float), ssm->output_dim * ssm->input_dim, file);
+    
+    // Write Adam state to file
+    fwrite(ssm->A_m, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    fwrite(ssm->A_v, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    fwrite(ssm->B_m, sizeof(float), ssm->state_dim * ssm->input_dim, file);
+    fwrite(ssm->B_v, sizeof(float), ssm->state_dim * ssm->input_dim, file);
+    fwrite(ssm->C_m, sizeof(float), ssm->output_dim * ssm->state_dim, file);
+    fwrite(ssm->C_v, sizeof(float), ssm->output_dim * ssm->state_dim, file);
+    fwrite(ssm->D_m, sizeof(float), ssm->output_dim * ssm->input_dim, file);
+    fwrite(ssm->D_v, sizeof(float), ssm->output_dim * ssm->input_dim, file);
 
     fclose(file);
     printf("Model saved to %s\n", filename);
@@ -473,25 +490,44 @@ void save_ssm(SSM* ssm, const char* filename) {
 // Function: load_model
 // Loads the model weights from a binary file and initializes a new SSM.
 // ---------------------------------------------------------------------
-SSM* load_ssm(const char* filename) {
+SSM* load_ssm(const char* filename, int custom_batch_size) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
         printf("Error opening file for reading: %s\n", filename);
         return NULL;
     }
 
-    int input_dim, state_dim, output_dim, batch_size;
+    int input_dim, state_dim, output_dim, stored_batch_size;
     fread(&input_dim, sizeof(int), 1, file);
     fread(&state_dim, sizeof(int), 1, file);
     fread(&output_dim, sizeof(int), 1, file);
-    fread(&batch_size, sizeof(int), 1, file);
-
+    fread(&stored_batch_size, sizeof(int), 1, file);
+    
+    int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, batch_size);
+    
+    // Read Adam hyperparameters
+    fread(&ssm->beta1, sizeof(float), 1, file);
+    fread(&ssm->beta2, sizeof(float), 1, file);
+    fread(&ssm->epsilon, sizeof(float), 1, file);
+    fread(&ssm->weight_decay, sizeof(float), 1, file);
+    fread(&ssm->adam_t, sizeof(int), 1, file);
 
+    // Read weight matrices
     fread(ssm->A, sizeof(float), state_dim * state_dim, file);
     fread(ssm->B, sizeof(float), state_dim * input_dim, file);
     fread(ssm->C, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D, sizeof(float), output_dim * input_dim, file);
+    
+    // Read Adam state
+    fread(ssm->A_m, sizeof(float), state_dim * state_dim, file);
+    fread(ssm->A_v, sizeof(float), state_dim * state_dim, file);
+    fread(ssm->B_m, sizeof(float), state_dim * input_dim, file);
+    fread(ssm->B_v, sizeof(float), state_dim * input_dim, file);
+    fread(ssm->C_m, sizeof(float), output_dim * state_dim, file);
+    fread(ssm->C_v, sizeof(float), output_dim * state_dim, file);
+    fread(ssm->D_m, sizeof(float), output_dim * input_dim, file);
+    fread(ssm->D_v, sizeof(float), output_dim * input_dim, file);
 
     fclose(file);
     printf("Model loaded from %s\n", filename);

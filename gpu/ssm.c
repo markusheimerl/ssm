@@ -110,7 +110,7 @@ int main() {
     printf("\nModel Evaluation\n");
     printf("================\n");
 
-    SSM* loaded_ssm = load_ssm(model_fname);
+    SSM* loaded_ssm = load_ssm(model_fname, 1);
     float* h_predictions = (float*)malloc(num_samples * output_dim * sizeof(float));
     
     // Generate predictions for all samples
