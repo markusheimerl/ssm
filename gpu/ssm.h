@@ -570,6 +570,13 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(&ssm->state_dim, sizeof(int), 1, file);
     fwrite(&ssm->output_dim, sizeof(int), 1, file);
     fwrite(&ssm->batch_size, sizeof(int), 1, file);
+    
+    // Write Adam hyperparameters
+    fwrite(&ssm->beta1, sizeof(float), 1, file);
+    fwrite(&ssm->beta2, sizeof(float), 1, file);
+    fwrite(&ssm->epsilon, sizeof(float), 1, file);
+    fwrite(&ssm->weight_decay, sizeof(float), 1, file);
+    fwrite(&ssm->adam_t, sizeof(int), 1, file);
 
     size_t size_A = ssm->state_dim * ssm->state_dim * sizeof(float);
     size_t size_B = ssm->state_dim * ssm->input_dim * sizeof(float);
@@ -581,23 +588,61 @@ void save_ssm(SSM* ssm, const char* filename) {
     float* h_B = (float*)malloc(size_B);
     float* h_C = (float*)malloc(size_C);
     float* h_D = (float*)malloc(size_D);
+    
+    // Allocate host buffers for Adam state
+    float* h_A_m = (float*)malloc(size_A);
+    float* h_A_v = (float*)malloc(size_A);
+    float* h_B_m = (float*)malloc(size_B);
+    float* h_B_v = (float*)malloc(size_B);
+    float* h_C_m = (float*)malloc(size_C);
+    float* h_C_v = (float*)malloc(size_C);
+    float* h_D_m = (float*)malloc(size_D);
+    float* h_D_v = (float*)malloc(size_D);
 
     // Copy weight matrices from device to host
     CHECK_CUDA(cudaMemcpy(h_A, ssm->d_A, size_A, cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(h_B, ssm->d_B, size_B, cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(h_C, ssm->d_C, size_C, cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(h_D, ssm->d_D, size_D, cudaMemcpyDeviceToHost));
+    
+    // Copy Adam state from device to host
+    CHECK_CUDA(cudaMemcpy(h_A_m, ssm->d_A_m, size_A, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_A_v, ssm->d_A_v, size_A, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_B_m, ssm->d_B_m, size_B, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_B_v, ssm->d_B_v, size_B, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_C_m, ssm->d_C_m, size_C, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_C_v, ssm->d_C_v, size_C, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_D_m, ssm->d_D_m, size_D, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_D_v, ssm->d_D_v, size_D, cudaMemcpyDeviceToHost));
 
     // Write weight matrices to file
     fwrite(h_A, sizeof(float), ssm->state_dim * ssm->state_dim, file);
     fwrite(h_B, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(h_C, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(h_D, sizeof(float), ssm->output_dim * ssm->input_dim, file);
+    
+    // Write Adam state to file
+    fwrite(h_A_m, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    fwrite(h_A_v, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    fwrite(h_B_m, sizeof(float), ssm->state_dim * ssm->input_dim, file);
+    fwrite(h_B_v, sizeof(float), ssm->state_dim * ssm->input_dim, file);
+    fwrite(h_C_m, sizeof(float), ssm->output_dim * ssm->state_dim, file);
+    fwrite(h_C_v, sizeof(float), ssm->output_dim * ssm->state_dim, file);
+    fwrite(h_D_m, sizeof(float), ssm->output_dim * ssm->input_dim, file);
+    fwrite(h_D_v, sizeof(float), ssm->output_dim * ssm->input_dim, file);
 
     free(h_A);
     free(h_B);
     free(h_C);
     free(h_D);
+    free(h_A_m);
+    free(h_A_v);
+    free(h_B_m);
+    free(h_B_v);
+    free(h_C_m);
+    free(h_C_v);
+    free(h_D_m);
+    free(h_D_v);
 
     fclose(file);
     printf("Model saved to %s\n", filename);
@@ -621,6 +666,13 @@ SSM* load_ssm(const char* filename) {
     fread(&batch_size, sizeof(int), 1, file);
 
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, batch_size);
+    
+    // Read Adam hyperparameters
+    fread(&ssm->beta1, sizeof(float), 1, file);
+    fread(&ssm->beta2, sizeof(float), 1, file);
+    fread(&ssm->epsilon, sizeof(float), 1, file);
+    fread(&ssm->weight_decay, sizeof(float), 1, file);
+    fread(&ssm->adam_t, sizeof(int), 1, file);
 
     size_t size_A = state_dim * state_dim * sizeof(float);
     size_t size_B = state_dim * input_dim * sizeof(float);
@@ -631,21 +683,59 @@ SSM* load_ssm(const char* filename) {
     float* h_B = (float*)malloc(size_B);
     float* h_C = (float*)malloc(size_C);
     float* h_D = (float*)malloc(size_D);
+    
+    // Allocate host buffers for Adam state
+    float* h_A_m = (float*)malloc(size_A);
+    float* h_A_v = (float*)malloc(size_A);
+    float* h_B_m = (float*)malloc(size_B);
+    float* h_B_v = (float*)malloc(size_B);
+    float* h_C_m = (float*)malloc(size_C);
+    float* h_C_v = (float*)malloc(size_C);
+    float* h_D_m = (float*)malloc(size_D);
+    float* h_D_v = (float*)malloc(size_D);
 
     fread(h_A, sizeof(float), state_dim * state_dim, file);
     fread(h_B, sizeof(float), state_dim * input_dim, file);
     fread(h_C, sizeof(float), output_dim * state_dim, file);
     fread(h_D, sizeof(float), output_dim * input_dim, file);
+    
+    // Read Adam state from file
+    fread(h_A_m, sizeof(float), state_dim * state_dim, file);
+    fread(h_A_v, sizeof(float), state_dim * state_dim, file);
+    fread(h_B_m, sizeof(float), state_dim * input_dim, file);
+    fread(h_B_v, sizeof(float), state_dim * input_dim, file);
+    fread(h_C_m, sizeof(float), output_dim * state_dim, file);
+    fread(h_C_v, sizeof(float), output_dim * state_dim, file);
+    fread(h_D_m, sizeof(float), output_dim * input_dim, file);
+    fread(h_D_v, sizeof(float), output_dim * input_dim, file);
 
     CHECK_CUDA(cudaMemcpy(ssm->d_A, h_A, size_A, cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_B, h_B, size_B, cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_C, h_C, size_C, cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_D, h_D, size_D, cudaMemcpyHostToDevice));
+    
+    // Copy Adam state to device
+    CHECK_CUDA(cudaMemcpy(ssm->d_A_m, h_A_m, size_A, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_A_v, h_A_v, size_A, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_B_m, h_B_m, size_B, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_B_v, h_B_v, size_B, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_C_m, h_C_m, size_C, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_C_v, h_C_v, size_C, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_D_m, h_D_m, size_D, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_D_v, h_D_v, size_D, cudaMemcpyHostToDevice));
 
     free(h_A);
     free(h_B);
     free(h_C);
     free(h_D);
+    free(h_A_m);
+    free(h_A_v);
+    free(h_B_m);
+    free(h_B_v);
+    free(h_C_m);
+    free(h_C_v);
+    free(h_D_m);
+    free(h_D_v);
 
     fclose(file);
     printf("Model loaded from %s\n", filename);
