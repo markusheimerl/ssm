@@ -652,19 +652,20 @@ void save_ssm(SSM* ssm, const char* filename) {
 // Function: load_model
 // Loads the model weights from a binary file and initializes a new SSM.
 // ---------------------------------------------------------------------
-SSM* load_ssm(const char* filename) {
+SSM* load_ssm(const char* filename, int custom_batch_size) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
         printf("Error opening file for reading: %s\n", filename);
         return NULL;
     }
 
-    int input_dim, state_dim, output_dim, batch_size;
+    int input_dim, state_dim, output_dim, stored_batch_size;
     fread(&input_dim, sizeof(int), 1, file);
     fread(&state_dim, sizeof(int), 1, file);
     fread(&output_dim, sizeof(int), 1, file);
-    fread(&batch_size, sizeof(int), 1, file);
-
+    fread(&stored_batch_size, sizeof(int), 1, file);
+    
+    int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, batch_size);
     
     // Read Adam hyperparameters
