@@ -63,10 +63,10 @@ typedef struct {
 } SSM;
 
 // ---------------------------------------------------------------------
-// Function: compute_stable_A
+// Function: compute_stable_A_ssm
 // Compute stable A matrix using tanh-based parameterization
 // ---------------------------------------------------------------------
-void compute_stable_A(float* A_stable, const float* A, int n) {
+void compute_stable_A_ssm(float* A_stable, const float* A, int n) {
     for (int idx = 0; idx < n*n; idx++) {
         int row = idx / n;
         int col = idx % n;
@@ -82,10 +82,10 @@ void compute_stable_A(float* A_stable, const float* A, int n) {
 }
 
 // ---------------------------------------------------------------------
-// Function: compute_A_grad_from_stable_grad
+// Function: compute_A_grad_from_stable_grad_ssm
 // Compute gradient for A analytically
 // ---------------------------------------------------------------------
-void compute_A_grad_from_stable_grad(float* A_grad, 
+void compute_A_grad_from_stable_grad_ssm(float* A_grad, 
                                     const float* A_stable_grad, 
                                     const float* A, int n) {
     for (int idx = 0; idx < n*n; idx++) {
@@ -105,10 +105,10 @@ void compute_A_grad_from_stable_grad(float* A_grad,
 }
 
 // ---------------------------------------------------------------------
-// Function: swish_forward
+// Function: swish_forward_ssm
 // swish(x) = x / (1 + exp(-x))
 // ---------------------------------------------------------------------
-void swish_forward(float* output, const float* input, int size) {
+void swish_forward_ssm(float* output, const float* input, int size) {
     for (int idx = 0; idx < size; idx++) {
         float x = input[idx];
         float sigmoid = 1.0f / (1.0f + expf(-x));
@@ -117,10 +117,10 @@ void swish_forward(float* output, const float* input, int size) {
 }
 
 // ---------------------------------------------------------------------
-// Function: swish_backward
+// Function: swish_backward_ssm
 // Computes derivative using: grad_output *= swish + sigmoid*(1-swish)
 // ---------------------------------------------------------------------
-void swish_backward(float* grad_output, const float* input, 
+void swish_backward_ssm(float* grad_output, const float* input, 
                    const float* activated, int size) {
     for (int idx = 0; idx < size; idx++) {
         float x = input[idx];
@@ -131,10 +131,10 @@ void swish_backward(float* grad_output, const float* input,
 }
 
 // ---------------------------------------------------------------------
-// Function: mse_loss
+// Function: mse_loss_ssm
 // Mean Squared Error loss computation (elementwise error)
 // ---------------------------------------------------------------------
-void mse_loss(float* error, const float* predictions, 
+void mse_loss_ssm(float* error, const float* predictions, 
              const float* targets, int size) {
     for (int idx = 0; idx < size; idx++) {
         float diff = predictions[idx] - targets[idx];
@@ -143,10 +143,10 @@ void mse_loss(float* error, const float* predictions,
 }
 
 // ---------------------------------------------------------------------
-// Function: adamw_update
+// Function: adamw_update_ssm
 // AdamW update (per weight element)
 // ---------------------------------------------------------------------
-void adamw_update(float* W, const float* grad, float* m, float* v, 
+void adamw_update_ssm(float* W, const float* grad, float* m, float* v, 
                  int size, float beta1, float beta2, float epsilon, 
                  float weight_decay, float learning_rate, int batch_size, 
                  float bias_correction1, float bias_correction2) {
@@ -238,7 +238,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
 }
 
 // ---------------------------------------------------------------------
-// Function: forward_pass
+// Function: forward_pass_ssm
 // Computes the forward pass:
 //   Compute A_stable from A
 //   pre_state = A_stable * state + B * X
@@ -246,11 +246,11 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
 //   predictions = C * next_state + D * X
 // Updates the internal state to next_state.
 // ---------------------------------------------------------------------
-void forward_pass(SSM* ssm, float* X) {
+void forward_pass_ssm(SSM* ssm, float* X) {
     const float alpha = 1.0f, beta = 0.0f;
 
     // Compute stable A from A for this forward pass
-    compute_stable_A(ssm->A_stable, ssm->A, ssm->state_dim);
+    compute_stable_A_ssm(ssm->A_stable, ssm->A, ssm->state_dim);
 
     // Compute pre_state = A_stable * state
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -270,7 +270,7 @@ void forward_pass(SSM* ssm, float* X) {
     int total_state = ssm->batch_size * ssm->state_dim;
     // Copy pre_state to next_state before applying activation in-place
     memcpy(ssm->next_state, ssm->pre_state, total_state * sizeof(float));
-    swish_forward(ssm->next_state, ssm->pre_state, total_state);
+    swish_forward_ssm(ssm->next_state, ssm->pre_state, total_state);
     
     // Compute predictions = C * next_state
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -291,12 +291,12 @@ void forward_pass(SSM* ssm, float* X) {
 }
 
 // ---------------------------------------------------------------------
-// Function: calculate_loss
+// Function: calculate_loss_ssm
 // Computes the Mean Squared Error loss between predictions and targets.
 // ---------------------------------------------------------------------
-float calculate_loss(SSM* ssm, float* y) {
+float calculate_loss_ssm(SSM* ssm, float* y) {
     int size = ssm->batch_size * ssm->output_dim;
-    mse_loss(ssm->error, ssm->predictions, y, size);
+    mse_loss_ssm(ssm->error, ssm->predictions, y, size);
     
     float loss = 0.0f;
     for (int i = 0; i < size; i++) {
@@ -306,10 +306,10 @@ float calculate_loss(SSM* ssm, float* y) {
 }
 
 // ---------------------------------------------------------------------
-// Function: zero_gradients
+// Function: zero_gradients_ssm
 // Clears the gradient arrays.
 // ---------------------------------------------------------------------
-void zero_gradients(SSM* ssm) {
+void zero_gradients_ssm(SSM* ssm) {
     int size_A = ssm->state_dim * ssm->state_dim * sizeof(float);
     int size_B = ssm->state_dim * ssm->input_dim * sizeof(float);
     int size_C = ssm->output_dim * ssm->state_dim * sizeof(float);
@@ -322,14 +322,14 @@ void zero_gradients(SSM* ssm) {
 }
 
 // ---------------------------------------------------------------------
-// Function: backward_pass
+// Function: backward_pass_ssm
 // Computes gradients through the network using the chain rule:
 //   dC_grad = error * (next_state)^T
 //   dD_grad = error * (input)^T
 //   state_error = C^T * error (back-propagated through output)
 // Then applies swish backward to state_error and computes gradients.
 // ---------------------------------------------------------------------
-void backward_pass(SSM* ssm, float* X) {
+void backward_pass_ssm(SSM* ssm, float* X) {
     const float alpha = 1.0f, beta = 0.0f;
 
     // Gradient for C: C_grad = error * (next_state)^T
@@ -355,7 +355,7 @@ void backward_pass(SSM* ssm, float* X) {
                              
     // Apply swish backward: modify state_error in place
     int total_state = ssm->batch_size * ssm->state_dim;
-    swish_backward(ssm->state_error, ssm->pre_state, ssm->next_state, total_state);
+    swish_backward_ssm(ssm->state_error, ssm->pre_state, ssm->next_state, total_state);
                                                       
     // First compute gradient for A_stable: temp = state_error * (state)^T
     // Reuse A_stable buffer for storing this gradient temporarily
@@ -366,7 +366,7 @@ void backward_pass(SSM* ssm, float* X) {
                 beta, ssm->A_stable, ssm->state_dim);
                              
     // Convert A_stable gradient to A gradient
-    compute_A_grad_from_stable_grad(ssm->A_grad, ssm->A_stable, ssm->A, ssm->state_dim);
+    compute_A_grad_from_stable_grad_ssm(ssm->A_grad, ssm->A_stable, ssm->A, ssm->state_dim);
                              
     // Gradient for B: B_grad = state_error * (X)^T
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
@@ -377,10 +377,10 @@ void backward_pass(SSM* ssm, float* X) {
 }
 
 // ---------------------------------------------------------------------
-// Function: update_weights
+// Function: update_weights_ssm
 // Uses the AdamW optimizer to update each weight matrix
 // ---------------------------------------------------------------------
-void update_weights(SSM* ssm, float learning_rate) {
+void update_weights_ssm(SSM* ssm, float learning_rate) {
     ssm->adam_t++; // Increment time step
     float bias_correction1 = 1.0f - powf(ssm->beta1, (float)ssm->adam_t);
     float bias_correction2 = 1.0f - powf(ssm->beta2, (float)ssm->adam_t);
@@ -390,19 +390,19 @@ void update_weights(SSM* ssm, float learning_rate) {
     int size_C = ssm->output_dim * ssm->state_dim;
     int size_D = ssm->output_dim * ssm->input_dim;
 
-    adamw_update(ssm->A, ssm->A_grad, ssm->A_m, ssm->A_v,
+    adamw_update_ssm(ssm->A, ssm->A_grad, ssm->A_m, ssm->A_v,
                 size_A, ssm->beta1, ssm->beta2, ssm->epsilon, ssm->weight_decay,
                 learning_rate, ssm->batch_size, bias_correction1, bias_correction2);
 
-    adamw_update(ssm->B, ssm->B_grad, ssm->B_m, ssm->B_v,
+    adamw_update_ssm(ssm->B, ssm->B_grad, ssm->B_m, ssm->B_v,
                 size_B, ssm->beta1, ssm->beta2, ssm->epsilon, ssm->weight_decay,
                 learning_rate, ssm->batch_size, bias_correction1, bias_correction2);
 
-    adamw_update(ssm->C, ssm->C_grad, ssm->C_m, ssm->C_v,
+    adamw_update_ssm(ssm->C, ssm->C_grad, ssm->C_m, ssm->C_v,
                 size_C, ssm->beta1, ssm->beta2, ssm->epsilon, ssm->weight_decay,
                 learning_rate, ssm->batch_size, bias_correction1, bias_correction2);
 
-    adamw_update(ssm->D, ssm->D_grad, ssm->D_m, ssm->D_v,
+    adamw_update_ssm(ssm->D, ssm->D_grad, ssm->D_m, ssm->D_v,
                 size_D, ssm->beta1, ssm->beta2, ssm->epsilon, ssm->weight_decay,
                 learning_rate, ssm->batch_size, bias_correction1, bias_correction2);
 }
@@ -443,7 +443,7 @@ void free_ssm(SSM* ssm) {
 }
 
 // ---------------------------------------------------------------------
-// Function: save_model
+// Function: save_ssm
 // Saves the model weights to a binary file.
 // ---------------------------------------------------------------------
 void save_ssm(SSM* ssm, const char* filename) {
@@ -487,7 +487,7 @@ void save_ssm(SSM* ssm, const char* filename) {
 }
 
 // ---------------------------------------------------------------------
-// Function: load_model
+// Function: load_ssm
 // Loads the model weights from a binary file and initializes a new SSM.
 // ---------------------------------------------------------------------
 SSM* load_ssm(const char* filename, int custom_batch_size) {

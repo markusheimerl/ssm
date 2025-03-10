@@ -100,7 +100,7 @@ typedef struct {
 // ---------------------------------------------------------------------
 // CUDA kernel: Compute stable A matrix using tanh-based parameterization
 // ---------------------------------------------------------------------
-__global__ void compute_stable_A_kernel(float* A_stable, const float* A, int n) {
+__global__ void compute_stable_A_kernel_ssm(float* A_stable, const float* A, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n*n) {
         int row = idx / n;
@@ -119,7 +119,7 @@ __global__ void compute_stable_A_kernel(float* A_stable, const float* A, int n) 
 // ---------------------------------------------------------------------
 // CUDA kernel: Compute gradient for A analytically
 // ---------------------------------------------------------------------
-__global__ void compute_A_grad_from_stable_grad(float* A_grad, 
+__global__ void compute_A_grad_from_stable_grad_kernel_ssm(float* A_grad, 
                                                const float* A_stable_grad, 
                                                const float* A, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -143,7 +143,7 @@ __global__ void compute_A_grad_from_stable_grad(float* A_grad,
 // CUDA kernel: swish activation forward pass
 // swish(x) = x / (1 + exp(-x))
 // ---------------------------------------------------------------------
-__global__ void swish_forward_kernel(float* output, const float* input, int size) {
+__global__ void swish_forward_kernel_ssm(float* output, const float* input, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float x = input[idx];
@@ -156,7 +156,7 @@ __global__ void swish_forward_kernel(float* output, const float* input, int size
 // CUDA kernel: swish activation backward pass
 // Computes derivative using: grad_output *= swish + sigmoid*(1-swish)
 // ---------------------------------------------------------------------
-__global__ void swish_backward_kernel(float* grad_output, const float* input, 
+__global__ void swish_backward_kernel_ssm(float* grad_output, const float* input, 
                                      const float* activated, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -170,7 +170,7 @@ __global__ void swish_backward_kernel(float* grad_output, const float* input,
 // ---------------------------------------------------------------------
 // CUDA kernel: Mean Squared Error loss computation (elementwise error)
 // ---------------------------------------------------------------------
-__global__ void mse_loss_kernel(float* error, const float* predictions, 
+__global__ void mse_loss_kernel_ssm(float* error, const float* predictions, 
                                const float* targets, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -182,7 +182,7 @@ __global__ void mse_loss_kernel(float* error, const float* predictions,
 // ---------------------------------------------------------------------
 // CUDA kernel: AdamW update (per weight element)
 // ---------------------------------------------------------------------
-__global__ void adamw_update_kernel(float* W, const float* grad, float* m, float* v, 
+__global__ void adamw_update_kernel_ssm(float* W, const float* grad, float* m, float* v, 
                                    int size, float beta1, float beta2, float epsilon, 
                                    float weight_decay, float learning_rate, int batch_size, 
                                    float bias_correction1, float bias_correction2) {
@@ -299,7 +299,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
 }
 
 // ---------------------------------------------------------------------
-// Function: forward_pass
+// Function: forward_pass_ssm
 // Computes the forward pass:
 //   Compute A_stable from A
 //   pre_state = A_stable * state + B * X
@@ -307,14 +307,14 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int batch_size) {
 //   predictions = C * next_state + D * X
 // Updates the internal state to next_state.
 // ---------------------------------------------------------------------
-void forward_pass(SSM* ssm, float* d_X) {
+void forward_pass_ssm(SSM* ssm, float* d_X) {
     const float alpha = 1.0f, beta = 0.0f;
 
     // Compute stable A from A for this forward pass
     int n = ssm->state_dim;
     int block_size = 256;
     int num_blocks = (n * n + block_size - 1) / block_size;
-    compute_stable_A_kernel<<<num_blocks, block_size>>>(ssm->d_A_stable, ssm->d_A, n);
+    compute_stable_A_kernel_ssm<<<num_blocks, block_size>>>(ssm->d_A_stable, ssm->d_A, n);
 
     // Compute pre_state = A_stable * state
     CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
@@ -338,7 +338,7 @@ void forward_pass(SSM* ssm, float* d_X) {
     int total_state = ssm->batch_size * ssm->state_dim;
     block_size = 256;
     num_blocks = (total_state + block_size - 1) / block_size;
-    swish_forward_kernel<<<num_blocks, block_size>>>(ssm->d_next_state, ssm->d_pre_state, total_state);
+    swish_forward_kernel_ssm<<<num_blocks, block_size>>>(ssm->d_next_state, ssm->d_pre_state, total_state);
     
     // Compute predictions = C * next_state
     CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
@@ -365,14 +365,14 @@ void forward_pass(SSM* ssm, float* d_X) {
 }
 
 // ---------------------------------------------------------------------
-// Function: calculate_loss
+// Function: calculate_loss_ssm
 // Computes the Mean Squared Error loss between predictions and targets.
 // ---------------------------------------------------------------------
-float calculate_loss(SSM* ssm, float* d_y) {
+float calculate_loss_ssm(SSM* ssm, float* d_y) {
     int size = ssm->batch_size * ssm->output_dim;
     int block_size = 256;
     int num_blocks = (size + block_size - 1) / block_size;
-    mse_loss_kernel<<<num_blocks, block_size>>>(ssm->d_error, ssm->d_predictions, d_y, size);
+    mse_loss_kernel_ssm<<<num_blocks, block_size>>>(ssm->d_error, ssm->d_predictions, d_y, size);
     float loss = 0.0f;
     CHECK_CUBLAS(cublasSdot(ssm->cublas_handle, size,
                            ssm->d_error, 1,
@@ -382,10 +382,10 @@ float calculate_loss(SSM* ssm, float* d_y) {
 }
 
 // ---------------------------------------------------------------------
-// Function: zero_gradients
+// Function: zero_gradients_ssm
 // Clears the gradient arrays on the device.
 // ---------------------------------------------------------------------
-void zero_gradients(SSM* ssm) {
+void zero_gradients_ssm(SSM* ssm) {
     int size_A = ssm->state_dim * ssm->state_dim * sizeof(float);
     int size_B = ssm->state_dim * ssm->input_dim * sizeof(float);
     int size_C = ssm->output_dim * ssm->state_dim * sizeof(float);
@@ -397,14 +397,14 @@ void zero_gradients(SSM* ssm) {
 }
 
 // ---------------------------------------------------------------------
-// Function: backward_pass
+// Function: backward_pass_ssm
 // Computes gradients through the network using the chain rule:
 //   dC_grad = error * (next_state)^T
 //   dD_grad = error * (input)^T
 //   state_error = C^T * error (back-propagated through output)
 // Then applies swish backward to state_error and computes gradients.
 // ---------------------------------------------------------------------
-void backward_pass(SSM* ssm, float* d_X) {
+void backward_pass_ssm(SSM* ssm, float* d_X) {
     const float alpha = 1.0f, beta = 0.0f;
 
     // Gradient for C: d_C_grad = error * (next_state)^T
@@ -438,7 +438,7 @@ void backward_pass(SSM* ssm, float* d_X) {
     int total_state = ssm->batch_size * ssm->state_dim;
     int block_size = 256;
     int num_blocks = (total_state + block_size - 1) / block_size;
-    swish_backward_kernel<<<num_blocks, block_size>>>(ssm->d_state_error, 
+    swish_backward_kernel_ssm<<<num_blocks, block_size>>>(ssm->d_state_error, 
                                                      ssm->d_pre_state, 
                                                      ssm->d_next_state, 
                                                      total_state);
@@ -456,7 +456,7 @@ void backward_pass(SSM* ssm, float* d_X) {
     int size_A = ssm->state_dim * ssm->state_dim;
     block_size = 256;
     num_blocks = (size_A + block_size - 1) / block_size;
-    compute_A_grad_from_stable_grad<<<num_blocks, block_size>>>(
+    compute_A_grad_from_stable_grad_kernel_ssm<<<num_blocks, block_size>>>(
         ssm->d_A_grad, ssm->d_A_stable, ssm->d_A, ssm->state_dim);
                              
     // Gradient for B: d_B_grad = state_error * (X)^T
@@ -470,10 +470,10 @@ void backward_pass(SSM* ssm, float* d_X) {
 }
 
 // ---------------------------------------------------------------------
-// Function: update_weights
+// Function: update_weights_ssm
 // Uses the AdamW optimizer to update each weight matrix
 // ---------------------------------------------------------------------
-void update_weights(SSM* ssm, float learning_rate) {
+void update_weights_ssm(SSM* ssm, float learning_rate) {
     ssm->adam_t++; // Increment time step
     float bias_correction1 = 1.0f - powf(ssm->beta1, (float)ssm->adam_t);
     float bias_correction2 = 1.0f - powf(ssm->beta2, (float)ssm->adam_t);
@@ -489,22 +489,22 @@ void update_weights(SSM* ssm, float learning_rate) {
     int num_blocks_C = (size_C + block_size - 1) / block_size;
     int num_blocks_D = (size_D + block_size - 1) / block_size;
 
-    adamw_update_kernel<<<num_blocks_A, block_size>>>(
+    adamw_update_kernel_ssm<<<num_blocks_A, block_size>>>(
         ssm->d_A, ssm->d_A_grad, ssm->d_A_m, ssm->d_A_v,
         size_A, ssm->beta1, ssm->beta2, ssm->epsilon, ssm->weight_decay,
         learning_rate, ssm->batch_size, bias_correction1, bias_correction2);
 
-    adamw_update_kernel<<<num_blocks_B, block_size>>>(
+    adamw_update_kernel_ssm<<<num_blocks_B, block_size>>>(
         ssm->d_B, ssm->d_B_grad, ssm->d_B_m, ssm->d_B_v,
         size_B, ssm->beta1, ssm->beta2, ssm->epsilon, ssm->weight_decay,
         learning_rate, ssm->batch_size, bias_correction1, bias_correction2);
 
-    adamw_update_kernel<<<num_blocks_C, block_size>>>(
+    adamw_update_kernel_ssm<<<num_blocks_C, block_size>>>(
         ssm->d_C, ssm->d_C_grad, ssm->d_C_m, ssm->d_C_v,
         size_C, ssm->beta1, ssm->beta2, ssm->epsilon, ssm->weight_decay,
         learning_rate, ssm->batch_size, bias_correction1, bias_correction2);
 
-    adamw_update_kernel<<<num_blocks_D, block_size>>>(
+    adamw_update_kernel_ssm<<<num_blocks_D, block_size>>>(
         ssm->d_D, ssm->d_D_grad, ssm->d_D_m, ssm->d_D_v,
         size_D, ssm->beta1, ssm->beta2, ssm->epsilon, ssm->weight_decay,
         learning_rate, ssm->batch_size, bias_correction1, bias_correction2);
@@ -555,7 +555,7 @@ void free_ssm(SSM* ssm) {
 }
 
 // ---------------------------------------------------------------------
-// Function: save_model
+// Function: save_ssm
 // Saves the model weights to a binary file.
 // ---------------------------------------------------------------------
 void save_ssm(SSM* ssm, const char* filename) {
@@ -649,7 +649,7 @@ void save_ssm(SSM* ssm, const char* filename) {
 }
 
 // ---------------------------------------------------------------------
-// Function: load_model
+// Function: load_ssm
 // Loads the model weights from a binary file and initializes a new SSM.
 // ---------------------------------------------------------------------
 SSM* load_ssm(const char* filename, int custom_batch_size) {

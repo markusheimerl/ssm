@@ -71,19 +71,19 @@ int main() {
                                     cudaMemcpyDeviceToDevice));
                 
                 // Forward pass
-                forward_pass(ssm, d_batch_X);
+                forward_pass_ssm(ssm, d_batch_X);
                 
                 // Calculate loss
-                float loss = calculate_loss(ssm, d_batch_y);
+                float loss = calculate_loss_ssm(ssm, d_batch_y);
                 epoch_loss += loss;
                 num_batches++;
                 
                 // Backward pass
-                zero_gradients(ssm);
-                backward_pass(ssm, d_batch_X);
+                zero_gradients_ssm(ssm);
+                backward_pass_ssm(ssm, d_batch_X);
                 
                 // Update weights
-                update_weights(ssm, learning_rate);
+                update_weights_ssm(ssm, learning_rate);
             }
         }
         
@@ -137,7 +137,7 @@ int main() {
                                 cudaMemcpyDeviceToDevice));
             
             // Forward pass
-            forward_pass(loaded_ssm, d_batch_X);
+            forward_pass_ssm(loaded_ssm, d_batch_X);
             
             // Copy predictions to host
             CHECK_CUDA(cudaMemcpy(&h_predictions[(seq_start + step) * output_dim],

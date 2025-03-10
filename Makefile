@@ -1,6 +1,6 @@
 CC = clang
 CFLAGS = -O3 -march=native -ffast-math -Wall -Wextra
-LDFLAGS = -static -lopenblas -lpthread -lm -flto
+LDFLAGS = -static -lopenblas -lm -flto
 
 ssm.out: ssm.c
 	$(CC) $(CFLAGS) $^ $(LDFLAGS) -o $@
