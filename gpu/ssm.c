@@ -110,18 +110,19 @@ int main() {
     printf("\nModel Evaluation\n");
     printf("================\n");
 
-    SSM* loaded_ssm = load_ssm(model_fname, 1);
+    // Load the model with the same batch_size as used for training
+    SSM* loaded_ssm = load_ssm(model_fname, batch_size);
     float* h_predictions = (float*)malloc(num_samples * output_dim * sizeof(float));
-    
+
     // Generate predictions for all samples
     CHECK_CUDA(cudaMemset(loaded_ssm->d_state, 0,
-                         loaded_ssm->batch_size * loaded_ssm->state_dim * sizeof(float)));
-    
+                        loaded_ssm->batch_size * loaded_ssm->state_dim * sizeof(float)));
+
     // Process sequences for prediction
     for (int seq_start = 0; seq_start <= num_samples - seq_length; seq_start += seq_length) {
         // Reset state for each sequence
         CHECK_CUDA(cudaMemset(loaded_ssm->d_state, 0,
-                             loaded_ssm->batch_size * loaded_ssm->state_dim * sizeof(float)));
+                            loaded_ssm->batch_size * loaded_ssm->state_dim * sizeof(float)));
         
         // Process sequence
         for (int step = 0; step < seq_length; step += batch_size) {
