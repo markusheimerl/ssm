@@ -35,7 +35,7 @@ typedef struct {
     float* predictions;     // seq_len x batch_size x output_dim
     float* error;          // seq_len x batch_size x output_dim
     float* state_error;    // seq_len x batch_size x state_dim
-    float* pre_activation_states;  // seq_len x batch_size x state_dim
+    float* state_outputs;  // seq_len x batch_size x state_dim
     
     // Dimensions
     int input_dim;
@@ -90,7 +90,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->predictions = (float*)malloc(seq_len * batch_size * output_dim * sizeof(float));
     ssm->error = (float*)malloc(seq_len * batch_size * output_dim * sizeof(float));
     ssm->state_error = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
-    ssm->pre_activation_states = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
+    ssm->state_outputs = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     
     // Initialize matrices with careful scaling for stability
     float scale_B = 0.5f / sqrt(input_dim);
@@ -129,7 +129,7 @@ void free_ssm(SSM* ssm) {
     free(ssm->A_m); free(ssm->A_v); free(ssm->B_m); free(ssm->B_v);
     free(ssm->C_m); free(ssm->C_v); free(ssm->D_m); free(ssm->D_v);
     free(ssm->states); free(ssm->predictions); free(ssm->error); free(ssm->state_error);
-    free(ssm->pre_activation_states);
+    free(ssm->state_outputs);
     free(ssm);
 }
 
@@ -137,47 +137,45 @@ void free_ssm(SSM* ssm) {
 void forward_pass_ssm(SSM* ssm, float* X) {
     // Clear states
     memset(ssm->states, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float));
-    memset(ssm->pre_activation_states, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float));
     
     for (int t = 0; t < ssm->seq_len; t++) {
         // Pointers to current timestep data (contiguous blocks)
         float* X_t = X + t * ssm->batch_size * ssm->input_dim;  // (batch_size, input_dim)
         
-        // Pre-activation states for this timestep (batch_size, state_dim)
-        float* z_t = ssm->pre_activation_states + t * ssm->batch_size * ssm->state_dim;
+        // Linear state update: h_t = X_t @ B^T + h_{t-1} @ A^T
+        float* h_t = ssm->states + t * ssm->batch_size * ssm->state_dim;
         
-        // Compute z_t = X_t @ B^T  
-        // (batch_size, input_dim) @ (input_dim, state_dim) = (batch_size, state_dim)
+        // Compute h_t = X_t @ B^T  
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                     ssm->batch_size, ssm->state_dim, ssm->input_dim,
                     1.0f, X_t, ssm->input_dim,
                     ssm->B, ssm->input_dim,
-                    0.0f, z_t, ssm->state_dim);
+                    0.0f, h_t, ssm->state_dim);
         
-        // Add z_t += h_{t-1} @ A^T if not first timestep
+        // Add h_t += h_{t-1} @ A^T if not first timestep
         if (t > 0) {
             float* h_prev = ssm->states + (t-1) * ssm->batch_size * ssm->state_dim;
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                         ssm->batch_size, ssm->state_dim, ssm->state_dim,
                         1.0f, h_prev, ssm->state_dim,
                         ssm->A, ssm->state_dim,
-                        1.0f, z_t, ssm->state_dim);
+                        1.0f, h_t, ssm->state_dim);
         }
         
-        // Apply Swish activation: h_t = z_t * sigmoid(z_t)
-        float* h_t = ssm->states + t * ssm->batch_size * ssm->state_dim;
+        // Apply Swish activation to state for output projection only
+        float* o_t = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim;
         for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
-            float z = z_t[i];
-            h_t[i] = z / (1.0f + expf(-z));  // Swish
+            float h = h_t[i];
+            o_t[i] = h / (1.0f + expf(-h));  // Swish activation
         }
         
-        // Compute outputs: y_t = h_t @ C^T + X_t @ D^T
+        // Compute outputs: y_t = swish(h_t) @ C^T + X_t @ D^T
         float* y_t = ssm->predictions + t * ssm->batch_size * ssm->output_dim;
         
-        // y_t = h_t @ C^T
+        // y_t = swish(h_t) @ C^T
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                     ssm->batch_size, ssm->output_dim, ssm->state_dim,
-                    1.0f, h_t, ssm->state_dim,
+                    1.0f, o_t, ssm->state_dim,
                     ssm->C, ssm->state_dim,
                     0.0f, y_t, ssm->output_dim);
         
@@ -219,15 +217,15 @@ void backward_pass_ssm(SSM* ssm, float* X) {
     for (int t = ssm->seq_len - 1; t >= 0; t--) {
         float* X_t = X + t * ssm->batch_size * ssm->input_dim;
         float* h_t = ssm->states + t * ssm->batch_size * ssm->state_dim;
-        float* z_t = ssm->pre_activation_states + t * ssm->batch_size * ssm->state_dim;
+        float* o_t = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim;
         float* dy_t = ssm->error + t * ssm->batch_size * ssm->output_dim;
         float* dh_t = ssm->state_error + t * ssm->batch_size * ssm->state_dim;
         
-        // Gradient w.r.t C: dC += dy_t^T @ h_t
+        // Gradient w.r.t C: dC += dy_t^T @ swish(h_t)
         cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                     ssm->output_dim, ssm->state_dim, ssm->batch_size,
                     1.0f, dy_t, ssm->output_dim,
-                    h_t, ssm->state_dim,
+                    o_t, ssm->state_dim,
                     1.0f, ssm->C_grad, ssm->state_dim);
         
         // Gradient w.r.t D: dD += dy_t^T @ X_t
@@ -237,12 +235,20 @@ void backward_pass_ssm(SSM* ssm, float* X) {
                     X_t, ssm->input_dim,
                     1.0f, ssm->D_grad, ssm->input_dim);
         
-        // Backprop to hidden state: dh_t = dy_t @ C
+        // Backprop through swish activation: do_t = dy_t @ C
+        float* do_t = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim; // reuse buffer
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                     ssm->batch_size, ssm->state_dim, ssm->output_dim,
                     1.0f, dy_t, ssm->output_dim,
                     ssm->C, ssm->state_dim,
-                    0.0f, dh_t, ssm->state_dim);
+                    0.0f, do_t, ssm->state_dim);
+        
+        // Apply Swish derivative: dh_t = do_t * swish'(h_t)
+        for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
+            float h = h_t[i];
+            float sigmoid = 1.0f / (1.0f + expf(-h));
+            dh_t[i] = do_t[i] * sigmoid * (1.0f + h * (1.0f - sigmoid));
+        }
         
         // Add gradient from next timestep if not last
         if (t < ssm->seq_len - 1) {
@@ -252,13 +258,6 @@ void backward_pass_ssm(SSM* ssm, float* X) {
                         1.0f, dh_next, ssm->state_dim,
                         ssm->A, ssm->state_dim,
                         1.0f, dh_t, ssm->state_dim);
-        }
-        
-        // Apply Swish derivative: dz = dh * swish'(z)
-        for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
-            float z = z_t[i];
-            float sigmoid = 1.0f / (1.0f + expf(-z));
-            dh_t[i] *= sigmoid * (1.0f + z * (1.0f - sigmoid));
         }
         
         // Gradient w.r.t B: dB += dh_t^T @ X_t
