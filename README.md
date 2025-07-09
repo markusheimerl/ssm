@@ -31,7 +31,7 @@ The AdamW optimizer maintains exponential moving averages of gradients through $
 
 $$
 \begin{align*}
-g &= \text{clip}(\frac{\partial L}{\partial W}, \text{clip\_value}) \\
+g &= \text{clip}\left(\frac{\partial L}{\partial W}, \text{clip value}\right) \\
 m &= \beta_1m + (1-\beta_1)g \\
 v &= \beta_2v + (1-\beta_2)g^2 \\
 W &= (1-\lambda\eta)W - \eta\cdot\frac{m}{1-\beta_1^t}/\sqrt{\frac{v}{1-\beta_2^t} + \epsilon}
