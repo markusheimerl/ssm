@@ -7,127 +7,102 @@
 #include <math.h>
 
 #define MAX_SYNTHETIC_OUTPUTS 4
-#define HIDDEN_STATE_DIM 8
 #define INPUT_RANGE_MIN -3.0f
 #define INPUT_RANGE_MAX 3.0f
-#define OUTPUT_RANGE_MIN -20.0f
-#define OUTPUT_RANGE_MAX 20.0f
 
-// Hidden state for synthetic data generation
-typedef struct {
-    float values[HIDDEN_STATE_DIM];  // Internal state vector
-} HiddenState;
-
-// Helper function to scale output to desired range
-float scale_output(float x) {
-    float squashed = tanhf(x);
-    return OUTPUT_RANGE_MIN + (squashed + 1.0f) * 0.5f * 
-           (OUTPUT_RANGE_MAX - OUTPUT_RANGE_MIN);
-}
-
-// Update hidden state based on input
-void update_hidden_state(HiddenState* state, const float* x, int input_dim) {
-    // Each input contributes to updating the hidden state
-    for(int i = 0; i < HIDDEN_STATE_DIM; i++) {
-        float sum = 0.0f;
-        for(int j = 0; j < input_dim; j++) {
-            // Different nonlinear contributions from each input
-            sum += sinf(state->values[i] + x[j]) * 0.1f;
-            sum += cosf(x[j] * state->values[(i+1)%HIDDEN_STATE_DIM]) * 0.1f;
-        }
-        // Update state with some decay
-        state->values[i] = state->values[i] * 0.95f + sum;
+float synth_fn(const float* x, int fx, int dim) {
+    switch(dim % MAX_SYNTHETIC_OUTPUTS) {
+        case 0: 
+            return sinf(x[0 % fx]*2)*cosf(x[1 % fx]*1.5f) + 
+                   powf(x[2 % fx],2)*x[3 % fx] + 
+                   expf(-powf(x[4 % fx]-x[5 % fx],2)) + 
+                   0.5f*sinf(x[6 % fx]*x[7 % fx]*(float)M_PI) +
+                   tanhf(x[8 % fx] + x[9 % fx]) +
+                   0.3f*cosf(x[10 % fx]*x[11 % fx]) +
+                   0.2f*powf(x[12 % fx], 2) +
+                   x[13 % fx]*sinf(x[14 % fx]);
+            
+        case 1: 
+            return tanhf(x[0 % fx]+x[1 % fx])*sinf(x[2 % fx]*2) + 
+                   logf(fabsf(x[3 % fx])+1)*cosf(x[4 % fx]) + 
+                   0.3f*powf(x[5 % fx]-x[6 % fx],3) +
+                   expf(-powf(x[7 % fx],2)) +
+                   sinf(x[8 % fx]*x[9 % fx]*0.5f) +
+                   0.4f*cosf(x[10 % fx] + x[11 % fx]) +
+                   powf(x[12 % fx]*x[13 % fx], 2) +
+                   0.1f*x[14 % fx];
+            
+        case 2: 
+            return expf(-powf(x[0 % fx]-0.5f,2))*sinf(x[1 % fx]*3) + 
+                   powf(cosf(x[2 % fx]),2)*x[3 % fx] + 
+                   0.2f*sinhf(x[4 % fx]*x[5 % fx]) +
+                   0.5f*tanhf(x[6 % fx] + x[7 % fx]) +
+                   powf(x[8 % fx], 3)*0.1f +
+                   cosf(x[9 % fx]*x[10 % fx]*(float)M_PI) +
+                   0.3f*expf(-powf(x[11 % fx]-x[12 % fx],2)) +
+                   0.2f*(x[13 % fx] + x[14 % fx]);
+            
+        case 3:
+            return powf(sinf(x[0 % fx]*x[1 % fx]), 2) +
+                   0.4f*tanhf(x[2 % fx] + x[3 % fx]*x[4 % fx]) +
+                   expf(-fabsf(x[5 % fx]-x[6 % fx])) +
+                   0.3f*cosf(x[7 % fx]*x[8 % fx]*2) +
+                   powf(x[9 % fx], 2)*sinf(x[10 % fx]) +
+                   0.2f*logf(fabsf(x[11 % fx]*x[12 % fx])+1) +
+                   0.1f*(x[13 % fx] - x[14 % fx]);
+            
+        default: 
+            return 0.0f;
     }
 }
 
-// Generate outputs based on current hidden state and inputs
-void generate_outputs(const HiddenState* state, const float* x, int input_dim, float* y, int output_dim) {
-    for(int i = 0; i < output_dim; i++) {
-        float state_sum = 0.0f;
-        float input_sum = 0.0f;
-
-        // Contribution from hidden state
-        switch(i) {
-            case 0:
-                state_sum = sinf(state->values[0]) * state->values[1] + 
-                           cosf(state->values[2] * state->values[3]);
-                break;
-            case 1:
-                state_sum = state->values[4 % HIDDEN_STATE_DIM] * 
-                           sinf(state->values[5 % HIDDEN_STATE_DIM]) + 
-                           state->values[6 % HIDDEN_STATE_DIM] * 
-                           state->values[7 % HIDDEN_STATE_DIM];
-                break;
-            case 2:
-                state_sum = sinf(state->values[0] * state->values[4 % HIDDEN_STATE_DIM]) * 
-                           cosf(state->values[2] * state->values[6 % HIDDEN_STATE_DIM]);
-                break;
-            case 3:
-                state_sum = state->values[1] * state->values[3] * 
-                           sinf(state->values[5 % HIDDEN_STATE_DIM] * 
-                           state->values[7 % HIDDEN_STATE_DIM]);
-                break;
+void generate_synthetic_sequence_data(float** X, float** y, int num_sequences, int seq_len, int input_dim, int output_dim) {
+    // Allocate memory for sequences
+    *X = (float*)malloc(num_sequences * seq_len * input_dim * sizeof(float));
+    *y = (float*)malloc(num_sequences * seq_len * output_dim * sizeof(float));
+    
+    for (int seq = 0; seq < num_sequences; seq++) {
+        // Generate a coherent sequence with temporal dependencies
+        float* seq_state = (float*)malloc(input_dim * sizeof(float));
+        
+        // Initialize sequence state
+        for (int i = 0; i < input_dim; i++) {
+            float rand_val = (float)rand() / (float)RAND_MAX;
+            seq_state[i] = INPUT_RANGE_MIN + rand_val * (INPUT_RANGE_MAX - INPUT_RANGE_MIN);
         }
-
-        // Contribution from current inputs
-        for(int j = 0; j < input_dim; j++) {
-            switch(i) {
-                case 0:
-                    input_sum += sinf(x[j]) * cosf(x[(j+1) % input_dim]);
-                    break;
-                case 1:
-                    input_sum += x[j] * sinf(x[(j+2) % input_dim]);
-                    break;
-                case 2:
-                    input_sum += cosf(x[j] * x[(j+1) % input_dim]);
-                    break;
-                case 3:
-                    input_sum += sinf(x[j] + x[(j+2) % input_dim]);
-                    break;
+        
+        for (int t = 0; t < seq_len; t++) {
+            int x_idx = seq * seq_len * input_dim + t * input_dim;
+            int y_idx = seq * seq_len * output_dim + t * output_dim;
+            
+            // More gradual evolution of sequence state
+            for (int i = 0; i < input_dim; i++) {
+                // Smoother temporal evolution
+                seq_state[i] = 0.95f * seq_state[i] + 0.05f * ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f);
+                
+                // Clip to input range
+                if (seq_state[i] > INPUT_RANGE_MAX) seq_state[i] = INPUT_RANGE_MAX;
+                if (seq_state[i] < INPUT_RANGE_MIN) seq_state[i] = INPUT_RANGE_MIN;
+                
+                (*X)[x_idx + i] = seq_state[i];
+            }
+            
+            // Generate outputs based on current input and time
+            for (int j = 0; j < output_dim; j++) {
+                float base_output = synth_fn(&(*X)[x_idx], input_dim, j);
+                
+                // Add temporal component based on position in sequence
+                float temporal_component = 0.1f * sinf(2.0f * M_PI * t / seq_len) * (j + 1);
+                
+                (*y)[y_idx + j] = base_output + temporal_component;
             }
         }
         
-        // Combine state and input contributions
-        float combined = 0.7f * state_sum + 0.3f * input_sum;
-        y[i] = scale_output(combined);
+        free(seq_state);
     }
 }
 
-void generate_synthetic_data(float** X, float** y, int num_samples, int input_dim, 
-                           int output_dim, int seq_len) {
-    // Allocate memory
-    *X = (float*)malloc(num_samples * input_dim * sizeof(float));
-    *y = (float*)malloc(num_samples * output_dim * sizeof(float));
-    
-    // Initialize hidden state
-    HiddenState state;
-    memset(&state, 0, sizeof(HiddenState));
-    
-    // Generate data
-    for(int i = 0; i < num_samples; i++) {
-        // Generate random inputs
-        for(int j = 0; j < input_dim; j++) {
-            (*X)[i * input_dim + j] = INPUT_RANGE_MIN + 
-                (INPUT_RANGE_MAX - INPUT_RANGE_MIN) * 
-                ((float)rand() / (float)RAND_MAX);
-        }
-        
-        // Reset state at sequence boundaries
-        if(i % seq_len == 0) {
-            memset(&state, 0, sizeof(HiddenState));
-        }
-        
-        // Update hidden state with current input
-        update_hidden_state(&state, &(*X)[i * input_dim], input_dim);
-        
-        // Generate outputs based on current state and inputs
-        generate_outputs(&state, &(*X)[i * input_dim], input_dim, 
-                        &(*y)[i * output_dim], output_dim);
-    }
-}
-
-void save_data_to_csv(float* X, float* y, int num_samples, int input_dim, 
-                     int output_dim, const char* filename) {
+void save_sequence_data_to_csv(float* X, float* y, int num_sequences, int seq_len, int input_dim, int output_dim, const char* filename) {
     FILE* file = fopen(filename, "w");
     if (!file) {
         printf("Error opening file for writing: %s\n", filename);
@@ -135,64 +110,98 @@ void save_data_to_csv(float* X, float* y, int num_samples, int input_dim,
     }
     
     // Write header
-    for(int i = 0; i < input_dim; i++) {
+    fprintf(file, "seq_id,time_step,");
+    for (int i = 0; i < input_dim; i++) {
         fprintf(file, "x%d,", i);
     }
-    for(int i = 0; i < output_dim - 1; i++) {
+    for (int i = 0; i < output_dim - 1; i++) {
         fprintf(file, "y%d,", i);
     }
     fprintf(file, "y%d\n", output_dim - 1);
     
     // Write data
-    for(int i = 0; i < num_samples; i++) {
-        for(int j = 0; j < input_dim; j++) {
-            fprintf(file, "%.17f,", X[i * input_dim + j]);
+    for (int seq = 0; seq < num_sequences; seq++) {
+        for (int t = 0; t < seq_len; t++) {
+            int x_idx = seq * seq_len * input_dim + t * input_dim;
+            int y_idx = seq * seq_len * output_dim + t * output_dim;
+            
+            fprintf(file, "%d,%d,", seq, t);
+            
+            // Input features
+            for (int j = 0; j < input_dim; j++) {
+                fprintf(file, "%.17f,", X[x_idx + j]);
+            }
+            // Output values
+            for (int j = 0; j < output_dim - 1; j++) {
+                fprintf(file, "%.17f,", y[y_idx + j]);
+            }
+            fprintf(file, "%.17f\n", y[y_idx + output_dim - 1]);
         }
-        for(int j = 0; j < output_dim - 1; j++) {
-            fprintf(file, "%.17f,", y[i * output_dim + j]);
-        }
-        fprintf(file, "%.17f\n", y[i * output_dim + output_dim - 1]);
     }
     
     fclose(file);
-    printf("Data saved to %s\n", filename);
+    printf("Sequence data saved to %s\n", filename);
 }
 
-void load_csv(const char* filename, float** X, float** y, int* num_samples, 
-             int size_x, int size_y) {
+// Load CSV sequence data
+void load_sequence_csv(const char* filename, float** X, float** y, int* num_sequences, int* seq_len, int input_dim, int output_dim) {
     FILE* file = fopen(filename, "r");
     if (!file) {
         printf("Error opening file: %s\n", filename);
         exit(1);
     }
     
+    // Skip header
     char buffer[4096];
     fgets(buffer, sizeof(buffer), file);
     
-    int count = 0;
+    // Count lines and determine dimensions
+    int max_seq_id = -1;
+    int max_time_step = -1;
+    
     while (fgets(buffer, sizeof(buffer), file)) {
-        count++;
+        int seq_id, time_step;
+        sscanf(buffer, "%d,%d,", &seq_id, &time_step);
+        if (seq_id > max_seq_id) max_seq_id = seq_id;
+        if (time_step > max_time_step) max_time_step = time_step;
     }
-    *num_samples = count;
     
-    *X = (float*)malloc(count * size_x * sizeof(float));
-    *y = (float*)malloc(count * size_y * sizeof(float));
+    *num_sequences = max_seq_id + 1;
+    *seq_len = max_time_step + 1;
     
+    // Allocate memory
+    *X = (float*)malloc((*num_sequences) * (*seq_len) * input_dim * sizeof(float));
+    *y = (float*)malloc((*num_sequences) * (*seq_len) * output_dim * sizeof(float));
+    
+    // Reset file pointer and skip header again
     fseek(file, 0, SEEK_SET);
     fgets(buffer, sizeof(buffer), file);
     
-    int idx = 0;
+    // Read data
     while (fgets(buffer, sizeof(buffer), file)) {
-        char* token = strtok(buffer, ",");
-        for(int i = 0; i < size_x; i++) {
-            (*X)[idx * size_x + i] = atof(token);
-            token = strtok(NULL, ",");
+        int seq_id, time_step;
+        char* ptr = buffer;
+        
+        // Parse seq_id and time_step
+        seq_id = strtol(ptr, &ptr, 10);
+        ptr++; // skip comma
+        time_step = strtol(ptr, &ptr, 10);
+        ptr++; // skip comma
+        
+        int x_idx = seq_id * (*seq_len) * input_dim + time_step * input_dim;
+        int y_idx = seq_id * (*seq_len) * output_dim + time_step * output_dim;
+        
+        // Parse input features
+        for (int i = 0; i < input_dim; i++) {
+            (*X)[x_idx + i] = strtof(ptr, &ptr);
+            ptr++; // skip comma
         }
-        for(int i = 0; i < size_y; i++) {
-            (*y)[idx * size_y + i] = atof(token);
-            token = strtok(NULL, ",");
+        
+        // Parse output values
+        for (int i = 0; i < output_dim; i++) {
+            (*y)[y_idx + i] = strtof(ptr, &ptr);
+            if (i < output_dim - 1) ptr++; // skip comma
         }
-        idx++;
     }
     
     fclose(file);

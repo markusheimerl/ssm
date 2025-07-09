@@ -1,51 +1,46 @@
 # ssm
 A state space model implementation
 
-Consider a nonlinear state space model operating on batched inputs of shape (batch_size × input_dim). The architecture consists of state transition matrices $A$ and $B$, output matrices $C$ and $D$, and a nonlinear swish activation, where the forward propagation follows:
+Consider a nonlinear state space model operating on sequential inputs of shape (batch_size × seq_len × input_dim). The model maintains internal states that evolve through learned temporal dynamics with Swish activation, where the forward propagation follows:
 
 $$
 \begin{align*}
-Z &= XB + sA \\
-s' &= Z\sigma(Z) \\
-Y &= s'C + XD
+z_t &= Ah_{t-1} + Bx_t \\
+h_t &= z_t\sigma(z_t) \\
+y_t &= Ch_t + Dx_t
 \end{align*}
 $$
 
-where $s$ is the current state and $s'$ is the next state. The swish activation $x\sigma(x)$ provides nonlinearity in the state transitions, yielding the following backward pass through the chain rule, where $\odot$ denotes elementwise multiplication:
+The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The Swish activation $z\sigma(z)$ enables nonlinear temporal modeling.
+
+For gradient computation through time, we apply backpropagation through time (BPTT) with Swish derivative $\sigma(z) + z\sigma(z)(1-\sigma(z))$, where $\odot$ denotes elementwise multiplication:
 
 $$
 \begin{align*}
-\frac{\partial L}{\partial Y} &= Y - Y_{\text{true}} \\
-\frac{\partial L}{\partial C} &= (s')^\top(\frac{\partial L}{\partial Y}) \\
-\frac{\partial L}{\partial D} &= X^\top(\frac{\partial L}{\partial Y}) \\
-\frac{\partial L}{\partial s'} &= (\frac{\partial L}{\partial Y})(C)^\top \\
-\frac{\partial L}{\partial Z} &= \frac{\partial L}{\partial s'} \odot [\sigma(Z) + Z\sigma(Z)(1-\sigma(Z))] \\
-\frac{\partial L}{\partial A} &= s^\top(\frac{\partial L}{\partial Z}) \\
-\frac{\partial L}{\partial B} &= X^\top(\frac{\partial L}{\partial Z})
+\frac{\partial L}{\partial y_t} &= y_t - y_{t,\text{true}} \\
+\frac{\partial L}{\partial C} &= \sum_t h_t^\top(\frac{\partial L}{\partial y_t}) \\
+\frac{\partial L}{\partial D} &= \sum_t x_t^\top(\frac{\partial L}{\partial y_t}) \\
+\frac{\partial L}{\partial h_t} &= C^\top(\frac{\partial L}{\partial y_t}) + A^\top(\frac{\partial L}{\partial h_{t+1}}) \\
+\frac{\partial L}{\partial z_t} &= \frac{\partial L}{\partial h_t} \odot [\sigma(z_t) + z_t\sigma(z_t)(1-\sigma(z_t))] \\
+\frac{\partial L}{\partial A} &= \sum_t h_{t-1}^\top(\frac{\partial L}{\partial z_t}) \\
+\frac{\partial L}{\partial B} &= \sum_t x_t^\top(\frac{\partial L}{\partial z_t})
 \end{align*}
 $$
 
-The AdamW optimizer maintains exponential moving averages of gradients and their squares through $\beta_1$ and $\beta_2$, while simultaneously applying L2 regularization through weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each matrix ($A$, $B$, $C$, $D$), the update rule is:
+The AdamW optimizer maintains exponential moving averages of gradients through $\beta_1$ and $\beta_2$, applies L2 regularization through weight decay $\lambda$, and includes gradient clipping to prevent exploding gradients during temporal backpropagation. For each parameter matrix $W$:
 
 $$
 \begin{align*}
-m &= \beta_1m + (1-\beta_1)(\frac{\partial L}{\partial W}) \\
-v &= \beta_2v + (1-\beta_2)(\frac{\partial L}{\partial W})^2 \\
+g &= \text{clip}(\frac{\partial L}{\partial W}, \text{clip\_value}) \\
+m &= \beta_1m + (1-\beta_1)g \\
+v &= \beta_2v + (1-\beta_2)g^2 \\
 W &= (1-\lambda\eta)W - \eta\cdot\frac{m}{1-\beta_1^t}/\sqrt{\frac{v}{1-\beta_2^t} + \epsilon}
 \end{align*}
 $$
 
-The implementation leverages BLAS for matrix operations, enabling efficient computation on modern hardware. Unlike a standard MLP, the SSM maintains state between forward passes, making it particularly suitable for modeling dynamical systems and time series data. The state can be reset at the beginning of each episode to model systems with known initial conditions.
+The implementation processes sequences sequentially within each batch, maintaining independent state trajectories per sequence while accumulating gradients across all sequences. Each sequence evolves temporally as $h_0 \rightarrow h_1 \rightarrow \cdots \rightarrow h_{T-1}$, enabling the model to capture both immediate input-output relationships and long-term dependencies.
 
-## System Stability
-
-The stability of the learned dynamics can be analyzed through the spectral radius of the state transition matrix $A$. A system is asymptotically stable if all eigenvalues of $A$ have magnitude less than 1:
-
-$$
-\rho(A) = \max_{i} |\lambda_i| < 1
-$$
-
-where $\lambda_i$ are the eigenvalues of $A$.
+The implementation leverages BLAS for matrix operations, enabling efficient computation on modern hardware.
 
 ## How to run
 ```

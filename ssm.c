@@ -1,227 +1,133 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <math.h>
 #include <time.h>
 #include "data.h"
 #include "ssm.h"
 
 int main() {
-    srand(time(NULL) ^ getpid());
+    srand(time(NULL));
     openblas_set_num_threads(4);
 
     // Parameters
     const int input_dim = 16;
-    const int state_dim = 512;
+    const int state_dim = 64;
     const int output_dim = 4;
-    const int seq_length = 32;
-    const int batch_size = 32;
-    const int num_samples = seq_length * batch_size;
+    const int seq_len = 50;
+    const int num_sequences = 64;
+    const int batch_size = num_sequences;
     
-    // Generate synthetic data
-    float *h_X, *h_y;
-    generate_synthetic_data(&h_X, &h_y, num_samples, input_dim, output_dim, seq_length);
+    // Generate synthetic sequence data
+    float *X, *y;
+    generate_synthetic_sequence_data(&X, &y, num_sequences, seq_len, input_dim, output_dim);
     
     // Initialize state space model
-    SSM* ssm = init_ssm(input_dim, state_dim, output_dim, batch_size);
+    SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
     
     // Training parameters
     const int num_epochs = 10000;
     const float learning_rate = 0.0001f;
     
-    // Allocate memory for batch data
-    float *batch_X = (float*)malloc(batch_size * input_dim * sizeof(float));
-    float *batch_y = (float*)malloc(batch_size * output_dim * sizeof(float));
-    
     // Training loop
-    for (int epoch = 0; epoch < num_epochs; epoch++) {
-        float epoch_loss = 0.0f;
-        int num_batches = 0;
+    for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
+        // Forward pass
+        forward_pass_ssm(ssm, X);
         
-        // Process data in sequences
-        for (int seq_start = 0; seq_start <= num_samples - seq_length; seq_start += seq_length) {
-            // Reset state at the beginning of each sequence
-            memset(ssm->state, 0, ssm->batch_size * ssm->state_dim * sizeof(float));
-            
-            // Process sequence in batches
-            for (int step = 0; step < seq_length; step += batch_size) {
-                int current_batch_size = batch_size;
-                if (seq_start + step + batch_size > num_samples) {
-                    current_batch_size = num_samples - (seq_start + step);
-                }
-                
-                // Prepare batch data
-                memcpy(batch_X, 
-                        &h_X[(seq_start + step) * input_dim],
-                        current_batch_size * input_dim * sizeof(float));
-                memcpy(batch_y,
-                        &h_y[(seq_start + step) * output_dim],
-                        current_batch_size * output_dim * sizeof(float));
-                
-                // Forward pass
-                forward_pass_ssm(ssm, batch_X);
-                
-                // Calculate loss
-                float loss = calculate_loss_ssm(ssm, batch_y);
-                epoch_loss += loss;
-                num_batches++;
-                
-                // Backward pass
-                zero_gradients_ssm(ssm);
-                backward_pass_ssm(ssm, batch_X);
-                
-                // Update weights
-                update_weights_ssm(ssm, learning_rate);
-            }
-        }
-        
+        // Calculate loss
+        float loss = calculate_loss_ssm(ssm, y);
+
         // Print progress
-        if ((epoch + 1) % 100 == 0) {
-            printf("Epoch [%d/%d], Average Loss: %.8f\n", 
-                    epoch + 1, num_epochs, epoch_loss / num_batches);
+        if (epoch > 0 && epoch % 100 == 0) {
+            printf("Epoch [%d/%d], Loss: %.8f\n", epoch, num_epochs, loss);
         }
+
+        // Don't update weights after final evaluation
+        if (epoch == num_epochs) break;
+
+        // Backward pass
+        zero_gradients_ssm(ssm);
+        backward_pass_ssm(ssm, X);
+        
+        // Update weights
+        update_weights_ssm(ssm, learning_rate);
     }
 
     // Get timestamp for filenames
     char model_fname[64], data_fname[64];
     time_t now = time(NULL);
-    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_ssm.bin", 
-                localtime(&now));
+    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_model.bin", 
+             localtime(&now));
     strftime(data_fname, sizeof(data_fname), "%Y%m%d_%H%M%S_data.csv", 
-                localtime(&now));
+             localtime(&now));
 
-    // Save model and data
+    // Save model and data with timestamped filenames
     save_ssm(ssm, model_fname);
-    save_data_to_csv(h_X, h_y, num_samples, input_dim, output_dim, data_fname);
+    save_sequence_data_to_csv(X, y, num_sequences, seq_len, input_dim, output_dim, data_fname);
     
-    // Model Evaluation
-    printf("\nModel Evaluation\n");
-    printf("================\n");
+    // Load the model back and verify
+    printf("\nVerifying saved model...\n");
 
-    // Load the model with the same batch_size as used for training
+    // Load the model back with original batch_size
     SSM* loaded_ssm = load_ssm(model_fname, batch_size);
-    float* h_predictions = (float*)malloc(num_samples * output_dim * sizeof(float));
-
-    // Generate predictions for all samples
-    memset(loaded_ssm->state, 0, loaded_ssm->batch_size * loaded_ssm->state_dim * sizeof(float));
-
-    // Process sequences for prediction
-    for (int seq_start = 0; seq_start <= num_samples - seq_length; seq_start += seq_length) {
-        // Reset state for each sequence
-        memset(loaded_ssm->state, 0, loaded_ssm->batch_size * loaded_ssm->state_dim * sizeof(float));
-        
-        // Process sequence
-        for (int step = 0; step < seq_length; step += batch_size) {
-            int current_batch_size = batch_size;
-            if (seq_start + step + batch_size > num_samples) {
-                current_batch_size = num_samples - (seq_start + step);
-            }
-            
-            // Prepare batch
-            memcpy(batch_X, 
-                    &h_X[(seq_start + step) * input_dim],
-                    current_batch_size * input_dim * sizeof(float));
-            
-            // Forward pass
-            forward_pass_ssm(loaded_ssm, batch_X);
-            
-            // Copy predictions
-            memcpy(&h_predictions[(seq_start + step) * output_dim],
-                    loaded_ssm->predictions,
-                    current_batch_size * output_dim * sizeof(float));
-        }
-    }
-
-    // Evaluation metrics per dimension
-    printf("\nPer-Dimension Analysis:\n");
-    printf("=====================\n");
-
-    double total_mse = 0.0;
     
-    for (int d = 0; d < output_dim; d++) {
-        printf("\nDimension %d:\n", d);
-        printf("--------------\n");
-        
-        // Calculate statistics
-        double sum_sq_error = 0.0;
-        double sum_y = 0.0;
-        double sum_sq_y = 0.0;
-        double sum_yhat = 0.0;
-        double sum_sq_yhat = 0.0;
-        double sum_y_yhat = 0.0;
-        int valid_samples = 0;
-        
-        // First pass: calculate sums
-        for (int i = 0; i < num_samples; i++) {
-            double y_i = h_y[i * output_dim + d];
-            double yhat_i = h_predictions[i * output_dim + d];
-            
-            if (!isnan(y_i) && !isnan(yhat_i) && !isinf(y_i) && !isinf(yhat_i)) {
-                sum_sq_error += (y_i - yhat_i) * (y_i - yhat_i);
-                sum_y += y_i;
-                sum_sq_y += y_i * y_i;
-                sum_yhat += yhat_i;
-                sum_sq_yhat += yhat_i * yhat_i;
-                sum_y_yhat += y_i * yhat_i;
-                valid_samples++;
-            }
-        }
-        
-        if (valid_samples == 0) {
-            printf("No valid samples for evaluation!\n");
-            continue;
-        }
+    // Forward pass with loaded model
+    forward_pass_ssm(loaded_ssm, X);
+    
+    // Calculate and print loss with loaded model
+    float verification_loss = calculate_loss_ssm(loaded_ssm, y);
+    printf("Loss with loaded model: %.8f\n", verification_loss);
 
-        // Calculate statistics
-        double mean_y = sum_y / valid_samples;
-        double mean_yhat = sum_yhat / valid_samples;
-        double mse = sum_sq_error / valid_samples;
-        
-        // Calculate R-squared components
-        double ss_tot = sum_sq_y - (sum_y * sum_y / valid_samples);
-        double ss_res = sum_sq_error;
-        
-        // Calculate correlation coefficient
-        double numerator = sum_y_yhat - (sum_y * sum_yhat / valid_samples);
-        double denominator = sqrt((sum_sq_y - (sum_y * sum_y / valid_samples)) * 
-                                (sum_sq_yhat - (sum_yhat * sum_yhat / valid_samples)));
-        double correlation = (denominator > 1e-10) ? numerator / denominator : 0.0;
-        
-        // Calculate R-squared
-        double r_squared = (ss_tot > 1e-10) ? 1.0 - (ss_res / ss_tot) : 0.0;
+    printf("\nEvaluating model performance...\n");
 
-        // Print metrics
-        printf("MSE: %.6f\n", mse);
-        printf("R²:  %.6f\n", r_squared);
-        printf("Correlation: %.6f\n", correlation);
-        printf("Mean Actual: %.6f\n", mean_y);
-        printf("Mean Predicted: %.6f\n", mean_yhat);
-        
-        // Print sample predictions
-        printf("\nSample Predictions (first 10):\n");
-        printf("Actual\t\tPredicted\tError\n");
-        printf("----------------------------------------\n");
-        for (int i = 0; i < 10 && i < num_samples; i++) {
-            double y_i = h_y[i * output_dim + d];
-            double yhat_i = h_predictions[i * output_dim + d];
-            if (!isnan(y_i) && !isnan(yhat_i) && !isinf(y_i) && !isinf(yhat_i)) {
-                printf("%.6f\t%.6f\t%.6f\n", y_i, yhat_i, yhat_i - y_i);
-            }
+    // Calculate R² scores
+    printf("\nR² scores:\n");
+    int total_samples = num_sequences * seq_len;
+    for (int i = 0; i < output_dim; i++) {
+        float y_mean = 0.0f;
+        for (int j = 0; j < total_samples; j++) {
+            y_mean += y[j * output_dim + i];
         }
-        
-        total_mse += mse;
+        y_mean /= total_samples;
+
+        float ss_res = 0.0f;
+        float ss_tot = 0.0f;
+        for (int j = 0; j < total_samples; j++) {
+            float diff_res = y[j * output_dim + i] - loaded_ssm->predictions[j * output_dim + i];
+            float diff_tot = y[j * output_dim + i] - y_mean;
+            ss_res += diff_res * diff_res;
+            ss_tot += diff_tot * diff_tot;
+        }
+        float r2 = 1.0f - (ss_res / ss_tot);
+        printf("R² score for output y%d: %.8f\n", i, r2);
     }
 
-    printf("\nOverall Performance:\n");
-    printf("===================\n");
-    printf("Average MSE across dimensions: %.6f\n", total_mse / output_dim);
+    // Print sample predictions from first sequence
+    printf("\nSample Predictions (first sequence, first 10 time steps):\n");
+    printf("Time\tOutput\t\tPredicted\tActual\t\tDifference\n");
+    printf("----------------------------------------------------------------\n");
 
+    for (int i = 0; i < output_dim; i++) {
+        printf("\ny%d:\n", i);
+        for (int t = 0; t < 10; t++) {
+            int idx = t * output_dim + i;  // First sequence
+            float pred = loaded_ssm->predictions[idx];
+            float actual = y[idx];
+            float diff = pred - actual;
+            printf("t=%d\t\t%8.3f\t%8.3f\t%8.3f\n", t, pred, actual, diff);
+        }
+        
+        // Calculate MAE for this output across all sequences and time steps
+        float mae = 0.0f;
+        for (int j = 0; j < total_samples; j++) {
+            mae += fabs(loaded_ssm->predictions[j * output_dim + i] - y[j * output_dim + i]);
+        }
+        mae /= total_samples;
+        printf("Mean Absolute Error for y%d: %.3f\n", i, mae);
+    }
+    
     // Cleanup
-    free(h_X);
-    free(h_y);
-    free(h_predictions);
-    free(batch_X);
-    free(batch_y);
+    free(X);
+    free(y);
     free_ssm(ssm);
     free_ssm(loaded_ssm);
     
