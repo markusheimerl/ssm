@@ -1,7 +1,7 @@
 # ssm
 A state space model implementation
 
-Consider a nonlinear state space model operating on sequential inputs of shape (batch_size × seq_len × input_dim). The model expects data in time-major format [time][batch][feature] for optimal matrix operations. The architecture maintains internal states that evolve through learned temporal dynamics with Swish activation, where the forward propagation follows:
+Consider a nonlinear state space model operating on sequential inputs of shape (batch_size × seq_len × input_dim). The architecture maintains internal states that evolve through learned temporal dynamics with Swish activation, where the forward propagation follows:
 
 $$
 \begin{align*}
