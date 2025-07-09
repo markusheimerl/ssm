@@ -36,9 +36,9 @@ int main() {
 
     // Parameters
     const int input_dim = 16;
-    const int state_dim = 64;
+    const int state_dim = 128;
     const int output_dim = 4;
-    const int seq_len = 50;
+    const int seq_len = 64;
     const int num_sequences = 64;
     const int batch_size = num_sequences;
     
