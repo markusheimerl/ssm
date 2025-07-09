@@ -1,13 +1,13 @@
 # ssm
 A state space model implementation
 
-Consider a nonlinear state space model operating on sequential inputs of shape (batch_size × seq_len × input_dim). The model maintains internal states that evolve through learned temporal dynamics with Swish activation, where the forward propagation follows:
+Consider a nonlinear state space model operating on sequential inputs of shape (batch_size × seq_len × input_dim). The model expects data in time-major format [time][batch][feature] for optimal matrix operations. The architecture maintains internal states that evolve through learned temporal dynamics with Swish activation, where the forward propagation follows:
 
 $$
 \begin{align*}
-z_t &= Ah_{t-1} + Bx_t \\
-h_t &= z_t\sigma(z_t) \\
-y_t &= Ch_t + Dx_t
+Z_t &= X_tB^T + H_{t-1}A^T \\
+H_t &= Z_t\sigma(Z_t) \\
+Y_t &= H_tC^T + X_tD^T
 \end{align*}
 $$
 
@@ -17,28 +17,27 @@ For gradient computation through time, we apply backpropagation through time (BP
 
 $$
 \begin{align*}
-\frac{\partial L}{\partial y_t} &= y_t - y_{t,\text{true}} \\
-\frac{\partial L}{\partial C} &= \sum_t h_t^\top(\frac{\partial L}{\partial y_t}) \\
-\frac{\partial L}{\partial D} &= \sum_t x_t^\top(\frac{\partial L}{\partial y_t}) \\
-\frac{\partial L}{\partial h_t} &= C^\top(\frac{\partial L}{\partial y_t}) + A^\top(\frac{\partial L}{\partial h_{t+1}}) \\
-\frac{\partial L}{\partial z_t} &= \frac{\partial L}{\partial h_t} \odot [\sigma(z_t) + z_t\sigma(z_t)(1-\sigma(z_t))] \\
-\frac{\partial L}{\partial A} &= \sum_t h_{t-1}^\top(\frac{\partial L}{\partial z_t}) \\
-\frac{\partial L}{\partial B} &= \sum_t x_t^\top(\frac{\partial L}{\partial z_t})
+\frac{\partial L}{\partial Y_t} &= Y_t - Y_{t,\text{true}} \\
+\frac{\partial L}{\partial C} &= \sum_t (\frac{\partial L}{\partial Y_t})^T H_t \\
+\frac{\partial L}{\partial D} &= \sum_t (\frac{\partial L}{\partial Y_t})^T X_t \\
+\frac{\partial L}{\partial H_t} &= (\frac{\partial L}{\partial Y_t})C + (\frac{\partial L}{\partial H_{t+1}})A \\
+\frac{\partial L}{\partial Z_t} &= \frac{\partial L}{\partial H_t} \odot [\sigma(Z_t) + Z_t\sigma(Z_t)(1-\sigma(Z_t))] \\
+\frac{\partial L}{\partial A} &= \sum_t (\frac{\partial L}{\partial Z_t})^T H_{t-1} \\
+\frac{\partial L}{\partial B} &= \sum_t (\frac{\partial L}{\partial Z_t})^T X_t
 \end{align*}
 $$
 
-The AdamW optimizer maintains exponential moving averages of gradients through $\beta_1$ and $\beta_2$, applies L2 regularization through weight decay $\lambda$. For each parameter matrix $W$:
+The AdamW optimizer maintains exponential moving averages of gradients and their squares through $\beta_1$ and $\beta_2$, while simultaneously applying L2 regularization through weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each weight matrix $W$, the update rule is:
 
 $$
 \begin{align*}
-g &= \frac{\partial L}{\partial W} \\
-m &= \beta_1m + (1-\beta_1)g \\
-v &= \beta_2v + (1-\beta_2)g^2 \\
+m &= \beta_1m + (1-\beta_1)(\frac{\partial L}{\partial W}) \\
+v &= \beta_2v + (1-\beta_2)(\frac{\partial L}{\partial W})^2 \\
 W &= (1-\lambda\eta)W - \eta\cdot\frac{m}{1-\beta_1^t}/\sqrt{\frac{v}{1-\beta_2^t} + \epsilon}
 \end{align*}
 $$
 
-The implementation processes sequences sequentially within each batch, maintaining independent state trajectories per sequence while accumulating gradients across all sequences. Each sequence evolves temporally as $h_0 \rightarrow h_1 \rightarrow \cdots \rightarrow h_{T-1}$, enabling the model to capture both immediate input-output relationships and long-term dependencies.
+The implementation processes sequences through time-major matrix operations, where each timestep processes all batch sequences simultaneously via efficient BLAS operations. Each sequence evolves temporally as $H_0 \rightarrow H_1 \rightarrow \cdots \rightarrow H_{T-1}$, enabling the model to capture both immediate input-output relationships and long-term dependencies.
 
 The implementation leverages BLAS for matrix operations, enabling efficient computation on modern hardware.
 
