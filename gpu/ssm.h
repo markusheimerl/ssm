@@ -238,7 +238,7 @@ void forward_pass_ssm(SSM* ssm, float* d_X) {
         float* d_X_t = d_X + t * ssm->batch_size * ssm->input_dim;
         float* d_h_t = ssm->d_states + t * ssm->batch_size * ssm->state_dim;
         
-        // Compute h_t = X_t @ B^T
+        // H_t = X_t B^T
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_T,
                                 CUBLAS_OP_N,
@@ -254,7 +254,7 @@ void forward_pass_ssm(SSM* ssm, float* d_X) {
                                 d_h_t,
                                 ssm->state_dim));
         
-        // Add h_t += h_{t-1} @ A^T if not first timestep
+        // H_t += H_{t-1} A^T
         if (t > 0) {
             float* d_h_prev = ssm->d_states + (t-1) * ssm->batch_size * ssm->state_dim;
             CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
@@ -273,16 +273,16 @@ void forward_pass_ssm(SSM* ssm, float* d_X) {
                                     ssm->state_dim));
         }
         
-        // Apply Swish activation to state for output projection
+        // O_t = H_t σ(H_t)
         float* d_o_t = ssm->d_state_outputs + t * ssm->batch_size * ssm->state_dim;
         int block_size = 256;
         int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
         swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o_t, d_h_t, ssm->batch_size * ssm->state_dim);
         
-        // Compute outputs: y_t = swish(h_t) @ C^T + X_t @ D^T
+        // Y_t = O_t C^T + X_t D^T
         float* d_y_t = ssm->d_predictions + t * ssm->batch_size * ssm->output_dim;
         
-        // y_t = swish(h_t) @ C^T
+        // Y_t = O_t C^T
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_T,
                                 CUBLAS_OP_N,
@@ -298,7 +298,7 @@ void forward_pass_ssm(SSM* ssm, float* d_X) {
                                 d_y_t,
                                 ssm->output_dim));
         
-        // y_t += X_t @ D^T
+        // Y_t += X_t D^T
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_T,
                                 CUBLAS_OP_N,
@@ -359,7 +359,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
         float* d_dy_t = ssm->d_error + t * ssm->batch_size * ssm->output_dim;
         float* d_dh_t = ssm->d_state_error + t * ssm->batch_size * ssm->state_dim;
         
-        // Gradient w.r.t C: dC += dy_t^T @ swish(h_t)
+        // ∂L/∂C += (∂L/∂Y_t)^T O_t
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_N,
                                 CUBLAS_OP_T,
@@ -375,7 +375,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 ssm->d_C_grad,
                                 ssm->state_dim));
         
-        // Gradient w.r.t D: dD += dy_t^T @ X_t
+        // ∂L/∂D += (∂L/∂Y_t)^T X_t
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_N,
                                 CUBLAS_OP_T,
@@ -391,7 +391,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 ssm->d_D_grad,
                                 ssm->input_dim));
         
-        // Backprop through swish activation: do_t = dy_t @ C
+        // ∂L/∂O_t = (∂L/∂Y_t)C
         float* d_do_t = d_o_t; // reuse buffer
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_N,
@@ -408,12 +408,12 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 d_do_t,
                                 ssm->state_dim));
         
-        // Apply Swish derivative: dh_t = do_t * swish'(h_t)
+        // ∂L/∂H_t = ∂L/∂O_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))]
         int block_size = 256;
         int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
         swish_backward_kernel_ssm<<<num_blocks, block_size>>>(d_dh_t, d_do_t, d_h_t, ssm->batch_size * ssm->state_dim);
         
-        // Add gradient from next timestep if not last
+        // ∂L/∂H_t += (∂L/∂H_{t+1})A
         if (t < ssm->seq_len - 1) {
             float* d_dh_next = ssm->d_state_error + (t+1) * ssm->batch_size * ssm->state_dim;
             CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
@@ -432,7 +432,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                     ssm->state_dim));
         }
         
-        // Gradient w.r.t B: dB += dh_t^T @ X_t
+        // ∂L/∂B += (∂L/∂H_t)^T X_t
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_N,
                                 CUBLAS_OP_T,
@@ -448,7 +448,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 ssm->d_B_grad,
                                 ssm->input_dim));
         
-        // Gradient w.r.t A: dA += dh_t^T @ h_{t-1}
+        // ∂L/∂A += (∂L/∂H_t)^T H_{t-1}
         if (t > 0) {
             float* d_h_prev = ssm->d_states + (t-1) * ssm->batch_size * ssm->state_dim;
             CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
@@ -488,13 +488,13 @@ __global__ void adamw_update_kernel_ssm(
     if (idx < size) {
         float g = grad[idx] / batch_size;
         
-        // m = β₁m + (1-β₁)(∂L/∂W)
+        // m = β₁m + (1-β₁)g
         m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
-        // v = β₂v + (1-β₂)(∂L/∂W)²
+        // v = β₂v + (1-β₂)g²
         v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
         
         float update = alpha_t * m[idx] / (sqrtf(v[idx]) + epsilon);
-        // W = (1-λη)W - η·(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
+        // W = (1-λη)W - η·m̂/√v̂
         weight[idx] = weight[idx] * (1.0f - learning_rate * weight_decay) - update;
     }
 }
