@@ -210,13 +210,6 @@ void zero_gradients_ssm(SSM* ssm) {
     memset(ssm->D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(float));
 }
 
-// Helper function to clip gradients
-float clip_gradient(float grad, float clip_value) {
-    if (grad > clip_value) return clip_value;
-    if (grad < -clip_value) return -clip_value;
-    return grad;
-}
-
 // Backward pass with Swish derivative
 void backward_pass_ssm(SSM* ssm, float* X) {
     // Clear state errors
@@ -288,7 +281,7 @@ void backward_pass_ssm(SSM* ssm, float* X) {
     }
 }
 
-// Update weights using AdamW with gradient clipping
+// Update weights using AdamW
 void update_weights_ssm(SSM* ssm, float learning_rate) {
     ssm->t++;
     
@@ -296,11 +289,9 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     float beta2_t = powf(ssm->beta2, ssm->t);
     float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
     
-    const float clip_value = 5.0f;
-    
     // Update A
     for (int i = 0; i < ssm->state_dim * ssm->state_dim; i++) {
-        float grad = clip_gradient(ssm->A_grad[i] / ssm->batch_size, clip_value);
+        float grad = ssm->A_grad[i] / ssm->batch_size;
         ssm->A_m[i] = ssm->beta1 * ssm->A_m[i] + (1.0f - ssm->beta1) * grad;
         ssm->A_v[i] = ssm->beta2 * ssm->A_v[i] + (1.0f - ssm->beta2) * grad * grad;
         float update = alpha_t * ssm->A_m[i] / (sqrtf(ssm->A_v[i]) + ssm->epsilon);
@@ -309,7 +300,7 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     
     // Update B
     for (int i = 0; i < ssm->state_dim * ssm->input_dim; i++) {
-        float grad = clip_gradient(ssm->B_grad[i] / ssm->batch_size, clip_value);
+        float grad = ssm->B_grad[i] / ssm->batch_size;
         ssm->B_m[i] = ssm->beta1 * ssm->B_m[i] + (1.0f - ssm->beta1) * grad;
         ssm->B_v[i] = ssm->beta2 * ssm->B_v[i] + (1.0f - ssm->beta2) * grad * grad;
         float update = alpha_t * ssm->B_m[i] / (sqrtf(ssm->B_v[i]) + ssm->epsilon);
@@ -318,7 +309,7 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     
     // Update C
     for (int i = 0; i < ssm->output_dim * ssm->state_dim; i++) {
-        float grad = clip_gradient(ssm->C_grad[i] / ssm->batch_size, clip_value);
+        float grad = ssm->C_grad[i] / ssm->batch_size;
         ssm->C_m[i] = ssm->beta1 * ssm->C_m[i] + (1.0f - ssm->beta1) * grad;
         ssm->C_v[i] = ssm->beta2 * ssm->C_v[i] + (1.0f - ssm->beta2) * grad * grad;
         float update = alpha_t * ssm->C_m[i] / (sqrtf(ssm->C_v[i]) + ssm->epsilon);
@@ -327,7 +318,7 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     
     // Update D
     for (int i = 0; i < ssm->output_dim * ssm->input_dim; i++) {
-        float grad = clip_gradient(ssm->D_grad[i] / ssm->batch_size, clip_value);
+        float grad = ssm->D_grad[i] / ssm->batch_size;
         ssm->D_m[i] = ssm->beta1 * ssm->D_m[i] + (1.0f - ssm->beta1) * grad;
         ssm->D_v[i] = ssm->beta2 * ssm->D_v[i] + (1.0f - ssm->beta2) * grad * grad;
         float update = alpha_t * ssm->D_m[i] / (sqrtf(ssm->D_v[i]) + ssm->epsilon);

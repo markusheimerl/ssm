@@ -27,11 +27,11 @@ $$
 \end{align*}
 $$
 
-The AdamW optimizer maintains exponential moving averages of gradients through $\beta_1$ and $\beta_2$, applies L2 regularization through weight decay $\lambda$, and includes gradient clipping to prevent exploding gradients during temporal backpropagation. For each parameter matrix $W$:
+The AdamW optimizer maintains exponential moving averages of gradients through $\beta_1$ and $\beta_2$, applies L2 regularization through weight decay $\lambda$. For each parameter matrix $W$:
 
 $$
 \begin{align*}
-g &= \text{clip}\left(\frac{\partial L}{\partial W}, \text{clip value}\right) \\
+g &= \frac{\partial L}{\partial W} \\
 m &= \beta_1m + (1-\beta_1)g \\
 v &= \beta_2v + (1-\beta_2)g^2 \\
 W &= (1-\lambda\eta)W - \eta\cdot\frac{m}{1-\beta_1^t}/\sqrt{\frac{v}{1-\beta_2^t} + \epsilon}
