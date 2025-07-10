@@ -102,7 +102,7 @@ void generate_synthetic_sequence_data(float** X, float** y, int num_sequences, i
     }
 }
 
-void save_sequence_data_to_csv(float* X, float* y, int num_sequences, int seq_len, int input_dim, int output_dim, const char* filename) {
+void save_synthetic_sequence_data_to_csv(float* X, float* y, int num_sequences, int seq_len, int input_dim, int output_dim, const char* filename) {
     FILE* file = fopen(filename, "w");
     if (!file) {
         printf("Error opening file for writing: %s\n", filename);

@@ -92,7 +92,7 @@ int main() {
 
     // Save model and data with timestamped filenames
     save_ssm(ssm, model_fname);
-    save_sequence_data_to_csv(X, y, num_sequences, seq_len, input_dim, output_dim, data_fname);
+    save_synthetic_sequence_data_to_csv(X, y, num_sequences, seq_len, input_dim, output_dim, data_fname);
     
     // Load the model back and verify
     printf("\nVerifying saved model...\n");
