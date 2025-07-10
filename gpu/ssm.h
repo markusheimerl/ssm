@@ -100,19 +100,19 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     float* C = (float*)malloc(output_dim * state_dim * sizeof(float));
     float* D = (float*)malloc(output_dim * input_dim * sizeof(float));
     
-    // Initialize matrices with careful scaling for stability
+    // Initialize matrices
+    float scale_A = 0.1f / sqrt(state_dim);
     float scale_B = 0.5f / sqrt(input_dim);
     float scale_C = 0.5f / sqrt(state_dim);
     float scale_D = 0.1f / sqrt(input_dim);
     
-    // Initialize A as a stable matrix with eigenvalues < 1
     for (int i = 0; i < state_dim * state_dim; i++) {
-        A[i] = ((float)rand() / (float)RAND_MAX * 2 - 1) * 0.05f;
+        A[i] = ((float)rand() / (float)RAND_MAX * 2 - 1) * scale_A;
     }
     
-    // Add diagonal stability
+    // Ensure diagonal dominance for stability
     for (int i = 0; i < state_dim; i++) {
-        A[i * state_dim + i] = 0.2f + ((float)rand() / (float)RAND_MAX * 0.1f);
+        A[i * state_dim + i] = scale_A + ((float)rand() / (float)RAND_MAX * scale_A);
     }
     
     for (int i = 0; i < state_dim * input_dim; i++) {
