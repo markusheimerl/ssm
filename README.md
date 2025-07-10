@@ -37,7 +37,7 @@ W &= (1-\lambda\eta)W - \eta\cdot\frac{m}{1-\beta_1^t}/\sqrt{\frac{v}{1-\beta_2^
 \end{align*}
 $$
 
-The implementation processes sequences through time-major matrix operations, where each timestep processes all batch sequences simultaneously via efficient BLAS operations. The linear state evolution allows for parallelization through scan algorithms, making the model computationally efficient for long sequences. Each sequence evolves temporally as $H_0 \rightarrow H_1 \rightarrow \cdots \rightarrow H_{T-1}$ through purely linear dynamics, while maintaining expressiveness through nonlinear output projections.
+The implementation processes sequences through time-major matrix operations, where each timestep processes all batch sequences simultaneously via efficient BLAS operations. Each sequence evolves temporally as $H_0 \rightarrow H_1 \rightarrow \cdots \rightarrow H_{T-1}$ through purely linear dynamics, while maintaining expressiveness through nonlinear output projections.
 
 The implementation leverages BLAS for matrix operations, enabling efficient computation on modern hardware.
 
