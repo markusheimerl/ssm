@@ -104,7 +104,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     
     // Add diagonal stability
     for (int i = 0; i < state_dim; i++) {
-        ssm->A[i * state_dim + i] = 0.5f + ((float)rand() / (float)RAND_MAX * 0.3f);
+        ssm->A[i * state_dim + i] = 0.2f + ((float)rand() / (float)RAND_MAX * 0.1f);
     }
     
     for (int i = 0; i < state_dim * input_dim; i++) {
