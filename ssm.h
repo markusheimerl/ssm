@@ -99,7 +99,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     float scale_D = 0.1f / sqrt(input_dim);
     
     for (int i = 0; i < state_dim * state_dim; i++) {
-        ssm->A[i] = ((float)rand() / (float)RAND_MAX * 2 - 1) * scale_A;
+        ssm->A[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_A;
     }
     
     // Ensure diagonal dominance for stability
@@ -108,15 +108,15 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     }
     
     for (int i = 0; i < state_dim * input_dim; i++) {
-        ssm->B[i] = ((float)rand() / (float)RAND_MAX * 2 - 1) * scale_B;
+        ssm->B[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_B;
     }
     
     for (int i = 0; i < output_dim * state_dim; i++) {
-        ssm->C[i] = ((float)rand() / (float)RAND_MAX * 2 - 1) * scale_C;
+        ssm->C[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_C;
     }
     
     for (int i = 0; i < output_dim * input_dim; i++) {
-        ssm->D[i] = ((float)rand() / (float)RAND_MAX * 2 - 1) * scale_D;
+        ssm->D[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_D;
     }
     
     return ssm;
