@@ -95,25 +95,15 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUBLAS(cublasCreate(&ssm->cublas_handle));
     
     // Allocate host memory for initialization
-    float* A = (float*)malloc(state_dim * state_dim * sizeof(float));
+    float* A = (float*)calloc(state_dim * state_dim, sizeof(float));
     float* B = (float*)malloc(state_dim * input_dim * sizeof(float));
     float* C = (float*)malloc(output_dim * state_dim * sizeof(float));
     float* D = (float*)malloc(output_dim * input_dim * sizeof(float));
     
-    // Initialize matrices
-    float scale_A = 0.5f / sqrt(state_dim);
-    float scale_B = 0.5f / sqrt(input_dim);
-    float scale_C = 0.5f / sqrt(state_dim);
-    float scale_D = 0.1f / sqrt(input_dim);
-    
-    for (int i = 0; i < state_dim * state_dim; i++) {
-        A[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_A;
-    }
-    
-    // Ensure diagonal dominance for stability
-    for (int i = 0; i < state_dim; i++) {
-        A[i * state_dim + i] = -scale_A - ((float)rand() / (float)RAND_MAX * scale_A);
-    }
+    // Initialize B, C, D matrices
+    float scale_B = 0.5f / sqrtf(input_dim);
+    float scale_C = 0.5f / sqrtf(state_dim);
+    float scale_D = 0.1f / sqrtf(input_dim);
     
     for (int i = 0; i < state_dim * input_dim; i++) {
         B[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_B;
@@ -125,6 +115,39 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     
     for (int i = 0; i < output_dim * input_dim; i++) {
         D[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_D;
+    }
+    
+    // HiPPO-Leg inspired initialization for A matrix
+    // Creates a lower triangular structure optimized for memory compression
+    // and long-range dependency modeling
+    
+    // Create base lower triangular structure
+    for (int i = 0; i < state_dim; i++) {
+        for (int j = 0; j <= i; j++) {
+            if (i == j) {
+                // Diagonal: negative values that increase in magnitude with index
+                // This creates a structured forgetting pattern
+                A[i * state_dim + j] = -0.01f - (i * 0.001f / state_dim);
+            } else {
+                // Off-diagonal: small positive values that decay with distance
+                // This enables information flow between nearby state components
+                float distance = i - j;
+                A[i * state_dim + j] = 0.001f / (1.0f + distance * 0.1f);
+            }
+        }
+    }
+    
+    // Apply Legendre polynomial scaling for optimal memory compression
+    // This gives higher-order basis functions more importance
+    float norm_factor = sqrtf(2.0f * state_dim + 1.0f);
+    for (int i = 0; i < state_dim; i++) {
+        float importance = sqrtf(2.0f * i + 1.0f);
+        float normalized_importance = 1.0f + 0.1f * importance / norm_factor;
+        
+        // Scale entire row by importance factor
+        for (int j = 0; j <= i; j++) {
+            A[i * state_dim + j] *= normalized_importance;
+        }
     }
     
     // Allocate device memory for matrices
