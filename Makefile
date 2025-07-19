@@ -1,42 +1,21 @@
 CC = clang
-CFLAGS = -O3 -march=native -ffast-math -Wall -Wextra -std=c99
-LDFLAGS = -static -lopenblas -lm -flto
+CFLAGS = -O3 -march=native -ffast-math -Wall -Wextra
+LDFLAGS = -lopenblas -lm -flto
 
-# Source files
-SOURCES = train.c ssm.c data.c
-OBJECTS = $(SOURCES:.c=.o)
-TARGET = train.out
+train.out: ssm.o data.o train.o
+	$(CC) ssm.o data.o train.o $(LDFLAGS) -o $@
 
-# Default target
-all: $(TARGET)
+ssm.o: ssm.c ssm.h
+	$(CC) $(CFLAGS) -c ssm.c -o $@
 
-# Build the main executable
-$(TARGET): $(OBJECTS)
-	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
+data.o: data.c data.h
+	$(CC) $(CFLAGS) -c data.c -o $@
 
-# Build object files
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+train.o: train.c ssm.h data.h
+	$(CC) $(CFLAGS) -c train.c -o $@
 
-# Run the program
-run: $(TARGET)
-	@time ./$(TARGET)
+run: train.out
+	@time ./train.out
 
-# Clean build artifacts
 clean:
-	rm -f *.o *.out *.csv *.bin
-
-# Debug build
-debug: CFLAGS += -g -DDEBUG
-debug: $(TARGET)
-
-# Show help
-help:
-	@echo "Available targets:"
-	@echo "  all     - Build the main executable (default)"
-	@echo "  run     - Build and run the program"
-	@echo "  clean   - Remove build artifacts"
-	@echo "  debug   - Build with debug symbols"
-	@echo "  help    - Show this help message"
-
-.PHONY: all run clean debug help
+	rm -f *.out *.o *.csv *.bin

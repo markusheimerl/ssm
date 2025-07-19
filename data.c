@@ -4,53 +4,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// Synthetic function for generating complex outputs (kept for backward compatibility)
-float synth_fn(const float* x, int fx, int dim) {
-    switch(dim % MAX_SYNTHETIC_OUTPUTS) {
-        case 0: 
-            return sinf(x[0 % fx]*2)*cosf(x[1 % fx]*1.5f) + 
-                   powf(x[2 % fx],2)*x[3 % fx] + 
-                   expf(-powf(x[4 % fx]-x[5 % fx],2)) + 
-                   0.5f*sinf(x[6 % fx]*x[7 % fx]*(float)M_PI) +
-                   tanhf(x[8 % fx] + x[9 % fx]) +
-                   0.3f*cosf(x[10 % fx]*x[11 % fx]) +
-                   0.2f*powf(x[12 % fx], 2) +
-                   x[13 % fx]*sinf(x[14 % fx]);
-            
-        case 1: 
-            return tanhf(x[0 % fx]+x[1 % fx])*sinf(x[2 % fx]*2) + 
-                   logf(fabsf(x[3 % fx])+1)*cosf(x[4 % fx]) + 
-                   0.3f*powf(x[5 % fx]-x[6 % fx],3) +
-                   expf(-powf(x[7 % fx],2)) +
-                   sinf(x[8 % fx]*x[9 % fx]*0.5f) +
-                   0.4f*cosf(x[10 % fx] + x[11 % fx]) +
-                   powf(x[12 % fx]*x[13 % fx], 2) +
-                   0.1f*x[14 % fx];
-            
-        case 2: 
-            return expf(-powf(x[0 % fx]-0.5f,2))*sinf(x[1 % fx]*3) + 
-                   powf(cosf(x[2 % fx]),2)*x[3 % fx] + 
-                   0.2f*sinhf(x[4 % fx]*x[5 % fx]) +
-                   0.5f*tanhf(x[6 % fx] + x[7 % fx]) +
-                   powf(x[8 % fx], 3)*0.1f +
-                   cosf(x[9 % fx]*x[10 % fx]*(float)M_PI) +
-                   0.3f*expf(-powf(x[11 % fx]-x[12 % fx],2)) +
-                   0.2f*(x[13 % fx] + x[14 % fx]);
-            
-        case 3:
-            return powf(sinf(x[0 % fx]*x[1 % fx]), 2) +
-                   0.4f*tanhf(x[2 % fx] + x[3 % fx]*x[4 % fx]) +
-                   expf(-fabsf(x[5 % fx]-x[6 % fx])) +
-                   0.3f*cosf(x[7 % fx]*x[8 % fx]*2) +
-                   powf(x[9 % fx], 2)*sinf(x[10 % fx]) +
-                   0.2f*logf(fabsf(x[11 % fx]*x[12 % fx])+1) +
-                   0.1f*(x[13 % fx] - x[14 % fx]);
-            
-        default: 
-            return 0.0f;
-    }
-}
-
 // Generate linear sequence data more suitable for linear state space models
 void generate_linear_sequence_data(float** X, float** y, int num_sequences, int seq_len, int input_dim, int output_dim) {
     // Allocate memory for sequences
@@ -133,53 +86,6 @@ void generate_linear_sequence_data(float** X, float** y, int num_sequences, int 
     
     free(linear_weights);
     free(temporal_weights);
-}
-
-// Generate complex sequence data (original function)
-void generate_synthetic_sequence_data(float** X, float** y, int num_sequences, int seq_len, int input_dim, int output_dim) {
-    // Allocate memory for sequences
-    *X = (float*)malloc(num_sequences * seq_len * input_dim * sizeof(float));
-    *y = (float*)malloc(num_sequences * seq_len * output_dim * sizeof(float));
-    
-    for (int seq = 0; seq < num_sequences; seq++) {
-        // Generate a coherent sequence with temporal dependencies
-        float* seq_state = (float*)malloc(input_dim * sizeof(float));
-        
-        // Initialize sequence state
-        for (int i = 0; i < input_dim; i++) {
-            float rand_val = (float)rand() / (float)RAND_MAX;
-            seq_state[i] = INPUT_RANGE_MIN + rand_val * (INPUT_RANGE_MAX - INPUT_RANGE_MIN);
-        }
-        
-        for (int t = 0; t < seq_len; t++) {
-            int x_idx = seq * seq_len * input_dim + t * input_dim;
-            int y_idx = seq * seq_len * output_dim + t * output_dim;
-            
-            // More gradual evolution of sequence state
-            for (int i = 0; i < input_dim; i++) {
-                // Smoother temporal evolution
-                seq_state[i] = 0.95f * seq_state[i] + 0.05f * ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f);
-                
-                // Clip to input range
-                if (seq_state[i] > INPUT_RANGE_MAX) seq_state[i] = INPUT_RANGE_MAX;
-                if (seq_state[i] < INPUT_RANGE_MIN) seq_state[i] = INPUT_RANGE_MIN;
-                
-                (*X)[x_idx + i] = seq_state[i];
-            }
-            
-            // Generate outputs based on current input and time
-            for (int j = 0; j < output_dim; j++) {
-                float base_output = synth_fn(&(*X)[x_idx], input_dim, j);
-                
-                // Add temporal component based on position in sequence
-                float temporal_component = 0.1f * sinf(2.0f * M_PI * t / seq_len) * (j + 1);
-                
-                (*y)[y_idx + j] = base_output + temporal_component;
-            }
-        }
-        
-        free(seq_state);
-    }
 }
 
 // Save sequence data to CSV

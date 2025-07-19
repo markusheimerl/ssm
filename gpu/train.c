@@ -2,12 +2,11 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
-#include "data.h"
+#include "../data.h"
 #include "ssm.h"
 
 int main() {
     srand(time(NULL));
-    openblas_set_num_threads(4);
 
     // Parameters
     const int input_dim = 16;
@@ -19,12 +18,19 @@ int main() {
     
     // Generate synthetic sequence data
     float *X, *y;
-    generate_linear_sequence_data(&X, &y, num_sequences, seq_len, input_dim, output_dim);
+    generate_synthetic_sequence_data(&X, &y, num_sequences, seq_len, input_dim, output_dim);
     
     // Reshape data for batch processing
     float *X_reshaped, *y_reshaped;
     reshape_data_for_batch_processing(X, y, &X_reshaped, &y_reshaped,
                                     num_sequences, seq_len, input_dim, output_dim);
+    
+    // Allocate device memory for input and output and copy data
+    float *d_X, *d_y;
+    CHECK_CUDA(cudaMalloc(&d_X, seq_len * batch_size * input_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_y, seq_len * batch_size * output_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemcpy(d_X, X_reshaped, seq_len * batch_size * input_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_y, y_reshaped, seq_len * batch_size * output_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     // Initialize state space model
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
@@ -36,10 +42,10 @@ int main() {
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
         // Forward pass
-        forward_pass_ssm(ssm, X_reshaped);
+        forward_pass_ssm(ssm, d_X);
         
         // Calculate loss
-        float loss = calculate_loss_ssm(ssm, y_reshaped);
+        float loss = calculate_loss_ssm(ssm, d_y);
 
         // Print progress
         if (epoch > 0 && epoch % 100 == 0) {
@@ -51,7 +57,7 @@ int main() {
 
         // Backward pass
         zero_gradients_ssm(ssm);
-        backward_pass_ssm(ssm, X_reshaped);
+        backward_pass_ssm(ssm, d_X);
         
         // Update weights
         update_weights_ssm(ssm, learning_rate);
@@ -60,9 +66,9 @@ int main() {
     // Get timestamp for filenames
     char model_fname[64], data_fname[64];
     time_t now = time(NULL);
-    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_linear_model.bin", 
+    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_model.bin", 
              localtime(&now));
-    strftime(data_fname, sizeof(data_fname), "%Y%m%d_%H%M%S_linear_data.csv", 
+    strftime(data_fname, sizeof(data_fname), "%Y%m%d_%H%M%S_data.csv", 
              localtime(&now));
 
     // Save model and data with timestamped filenames
@@ -75,14 +81,22 @@ int main() {
     // Load the model back with original batch_size
     SSM* loaded_ssm = load_ssm(model_fname, batch_size);
     
+    // Allocate host memory for predictions
+    float* predictions = (float*)malloc(seq_len * num_sequences * output_dim * sizeof(float));
+
     // Forward pass with loaded model
-    forward_pass_ssm(loaded_ssm, X_reshaped);
+    forward_pass_ssm(loaded_ssm, d_X);
+    
+    // Copy predictions from device to host
+    CHECK_CUDA(cudaMemcpy(predictions, loaded_ssm->d_predictions, 
+                         seq_len * num_sequences * output_dim * sizeof(float),
+                         cudaMemcpyDeviceToHost));
     
     // Calculate and print loss with loaded model
-    float verification_loss = calculate_loss_ssm(loaded_ssm, y_reshaped);
+    float verification_loss = calculate_loss_ssm(loaded_ssm, d_y);
     printf("Loss with loaded model: %.8f\n", verification_loss);
 
-    printf("\nEvaluating linear model performance...\n");
+    printf("\nEvaluating model performance...\n");
 
     // Calculate R² scores
     printf("\nR² scores:\n");
@@ -102,7 +116,7 @@ int main() {
         for (int t = 0; t < seq_len; t++) {
             for (int b = 0; b < num_sequences; b++) {
                 int idx = t * num_sequences * output_dim + b * output_dim + i;
-                float diff_res = y_reshaped[idx] - loaded_ssm->predictions[idx];
+                float diff_res = y_reshaped[idx] - predictions[idx];
                 float diff_tot = y_reshaped[idx] - y_mean;
                 ss_res += diff_res * diff_res;
                 ss_tot += diff_tot * diff_tot;
@@ -122,7 +136,7 @@ int main() {
         for (int t = 0; t < 10; t++) {
             // First sequence (b=0) in reshaped format
             int idx = t * num_sequences * output_dim + 0 * output_dim + i;
-            float pred = loaded_ssm->predictions[idx];
+            float pred = predictions[idx];
             float actual = y_reshaped[idx];
             float diff = pred - actual;
             printf("t=%d\t\t%8.3f\t%8.3f\t%8.3f\n", t, pred, actual, diff);
@@ -133,7 +147,7 @@ int main() {
         for (int t = 0; t < seq_len; t++) {
             for (int b = 0; b < num_sequences; b++) {
                 int idx = t * num_sequences * output_dim + b * output_dim + i;
-                mae += fabs(loaded_ssm->predictions[idx] - y_reshaped[idx]);
+                mae += fabs(predictions[idx] - y_reshaped[idx]);
             }
         }
         mae /= total_samples;
@@ -145,6 +159,9 @@ int main() {
     free(y);
     free(X_reshaped);
     free(y_reshaped);
+    free(predictions);
+    cudaFree(d_X);
+    cudaFree(d_y);
     free_ssm(ssm);
     free_ssm(loaded_ssm);
     

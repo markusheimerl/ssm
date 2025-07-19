@@ -277,9 +277,7 @@ void forward_pass_ssm(SSM* ssm, float* d_X) {
                                     ssm->state_dim));
         }
         
-        // O_t = H_t (direct use of hidden state - no separate output)
-        
-        // Y_t = H_t C^T + X_t D^T (using hidden state directly)
+        // Y_t = H_t C^T + X_t D^T
         float* d_y_t = ssm->d_predictions + t * ssm->batch_size * ssm->output_dim;
         
         // Y_t = H_t C^T
@@ -358,7 +356,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
         float* d_dy_t = ssm->d_error + t * ssm->batch_size * ssm->output_dim;
         float* d_dh_t = ssm->d_state_error + t * ssm->batch_size * ssm->state_dim;
         
-        // ∂L/∂C += (∂L/∂Y_t)^T H_t (using hidden state directly)
+        // ∂L/∂C += (∂L/∂Y_t)^T H_t
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_N,
                                 CUBLAS_OP_T,
