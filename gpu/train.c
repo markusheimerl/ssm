@@ -43,7 +43,7 @@ int main() {
     
     // Generate synthetic sequence data
     float *X, *y;
-    generate_synthetic_sequence_data(&X, &y, num_sequences, seq_len, input_dim, output_dim);
+    generate_synthetic_data(&X, &y, num_sequences, seq_len, input_dim, output_dim, -3.0f, 3.0f);
     
     // Reshape data for batch processing
     float *X_reshaped, *y_reshaped;
@@ -98,7 +98,7 @@ int main() {
 
     // Save model and data with timestamped filenames
     save_ssm(ssm, model_fname);
-    save_synthetic_sequence_data_to_csv(X, y, num_sequences, seq_len, input_dim, output_dim, data_fname);
+    save_data(X, y, num_sequences, seq_len, input_dim, output_dim, data_fname);
     
     // Load the model back and verify
     printf("\nVerifying saved model...\n");
