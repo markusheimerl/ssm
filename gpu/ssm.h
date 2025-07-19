@@ -220,22 +220,19 @@ void free_ssm(SSM* ssm) {
     free(ssm);
 }
 
-// CUDA kernel for Swish activation
-__global__ void swish_forward_kernel_ssm(float* output, float* input, int size) {
+// CUDA kernel for linear activation (identity)
+__global__ void linear_forward_kernel_ssm(float* output, float* input, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        float x = input[idx];
-        output[idx] = x / (1.0f + expf(-x));
+        output[idx] = input[idx];
     }
 }
 
-// CUDA kernel for Swish derivative
-__global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size) {
+// CUDA kernel for linear derivative (identity)
+__global__ void linear_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        float x = input[idx];
-        float sigmoid = 1.0f / (1.0f + expf(-x));
-        grad_input[idx] = grad_output[idx] * sigmoid * (1.0f + x * (1.0f - sigmoid));
+        grad_input[idx] = grad_output[idx];
     }
 }
 
@@ -296,11 +293,11 @@ void forward_pass_ssm(SSM* ssm, float* d_X) {
                                     ssm->state_dim));
         }
         
-        // O_t = H_t σ(H_t)
+        // O_t = H_t (linear - no activation)
         float* d_o_t = ssm->d_state_outputs + t * ssm->batch_size * ssm->state_dim;
         int block_size = 256;
         int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
-        swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o_t, d_h_t, ssm->batch_size * ssm->state_dim);
+        linear_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o_t, d_h_t, ssm->batch_size * ssm->state_dim);
         
         // Y_t = O_t C^T + X_t D^T
         float* d_y_t = ssm->d_predictions + t * ssm->batch_size * ssm->output_dim;
@@ -431,10 +428,10 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 d_do_t,
                                 ssm->state_dim));
         
-        // ∂L/∂H_t = ∂L/∂O_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))]
+        // ∂L/∂H_t = ∂L/∂O_t (linear - no activation derivative)
         int block_size = 256;
         int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
-        swish_backward_kernel_ssm<<<num_blocks, block_size>>>(d_dh_t, d_do_t, d_h_t, ssm->batch_size * ssm->state_dim);
+        linear_backward_kernel_ssm<<<num_blocks, block_size>>>(d_dh_t, d_do_t, d_h_t, ssm->batch_size * ssm->state_dim);
         
         // ∂L/∂H_t += (∂L/∂H_{t+1})A
         if (t < ssm->seq_len - 1) {

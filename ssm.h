@@ -186,11 +186,10 @@ void forward_pass_ssm(SSM* ssm, float* X) {
                         1.0f, h_t, ssm->state_dim);
         }
         
-        // O_t = H_t σ(H_t)
+        // O_t = H_t (linear - no activation)
         float* o_t = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim;
         for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
-            float h = h_t[i];
-            o_t[i] = h / (1.0f + expf(-h));
+            o_t[i] = h_t[i];
         }
         
         // Y_t = O_t C^T + X_t D^T
@@ -240,7 +239,6 @@ void backward_pass_ssm(SSM* ssm, float* X) {
     
     for (int t = ssm->seq_len - 1; t >= 0; t--) {
         float* X_t = X + t * ssm->batch_size * ssm->input_dim;
-        float* h_t = ssm->states + t * ssm->batch_size * ssm->state_dim;
         float* o_t = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim;
         float* dy_t = ssm->error + t * ssm->batch_size * ssm->output_dim;
         float* dh_t = ssm->state_error + t * ssm->batch_size * ssm->state_dim;
@@ -267,11 +265,9 @@ void backward_pass_ssm(SSM* ssm, float* X) {
                     ssm->C, ssm->state_dim,
                     0.0f, do_t, ssm->state_dim);
         
-        // ∂L/∂H_t = ∂L/∂O_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))]
+        // ∂L/∂H_t = ∂L/∂O_t (linear - no activation derivative)
         for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
-            float h = h_t[i];
-            float sigmoid = 1.0f / (1.0f + expf(-h));
-            dh_t[i] = do_t[i] * sigmoid * (1.0f + h * (1.0f - sigmoid));
+            dh_t[i] = do_t[i];
         }
         
         // ∂L/∂H_t += (∂L/∂H_{t+1})A
