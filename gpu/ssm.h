@@ -73,6 +73,12 @@ typedef struct {
     int batch_size;
 } SSM;
 
+// CUDA kernel prototypes
+__global__ void swish_forward_kernel_ssm(float* output, float* input, int size);
+__global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size);
+__global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y, int size);
+__global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int batch_size);
+
 // Function prototypes
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
 void free_ssm(SSM* ssm);
@@ -83,15 +89,5 @@ void backward_pass_ssm(SSM* ssm, float* d_X);
 void update_weights_ssm(SSM* ssm, float learning_rate);
 void save_ssm(SSM* ssm, const char* filename);
 SSM* load_ssm(const char* filename, int custom_batch_size);
-
-// CUDA kernel prototypes
-__global__ void swish_forward_kernel_ssm(float* output, float* input, int size);
-__global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size);
-__global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y, int size);
-__global__ void adamw_update_kernel_ssm(
-    float* weight, float* grad, float* m, float* v,
-    float beta1, float beta2, float epsilon, float learning_rate,
-    float weight_decay, float alpha_t, int size, int batch_size
-);
 
 #endif
