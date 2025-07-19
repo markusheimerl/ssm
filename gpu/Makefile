@@ -4,11 +4,20 @@ LDFLAGS = -lm -flto
 CUDAFLAGS = --cuda-gpu-arch=sm_87 -x cuda -Wno-unknown-cuda-version
 CUDALIBS = -L/usr/local/cuda/lib64 -lcudart -lcublas
 
-ssm.out: ssm.c
-	$(CC) $(CFLAGS) $(CUDAFLAGS) $^ $(CUDALIBS) $(LDFLAGS) -o $@
+train.out: ssm.o data.o train.o
+	$(CC) ssm.o data.o train.o $(CUDALIBS) $(LDFLAGS) -o $@
 
-run: ssm.out
-	@time ./ssm.out
+ssm.o: ssm.c ssm.h
+	$(CC) $(CFLAGS) $(CUDAFLAGS) -c ssm.c -o $@
+
+data.o: ../data.c ../data.h
+	$(CC) $(CFLAGS) $(CUDAFLAGS) -c ../data.c -o $@
+
+train.o: train.c ssm.h ../data.h
+	$(CC) $(CFLAGS) $(CUDAFLAGS) -c train.c -o $@
+
+run: train.out
+	@time ./train.out
 
 clean:
-	rm -f *.out *.csv *.bin
+	rm -f *.out *.o *.csv *.bin
