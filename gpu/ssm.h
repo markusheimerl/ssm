@@ -60,7 +60,6 @@ typedef struct {
     float* d_predictions;     // seq_len x batch_size x output_dim
     float* d_error;          // seq_len x batch_size x output_dim
     float* d_state_error;    // seq_len x batch_size x state_dim
-    float* d_state_outputs;  // seq_len x batch_size x state_dim
     
     // cuBLAS handle
     cublasHandle_t cublas_handle;
@@ -177,7 +176,6 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&ssm->d_predictions, seq_len * batch_size * output_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_error, seq_len * batch_size * output_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_state_error, seq_len * batch_size * state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_state_outputs, seq_len * batch_size * state_dim * sizeof(float)));
     
     // Copy initialized matrices to device
     CHECK_CUDA(cudaMemcpy(ssm->d_A, A, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
@@ -212,7 +210,7 @@ void free_ssm(SSM* ssm) {
     cudaFree(ssm->d_A_m); cudaFree(ssm->d_A_v); cudaFree(ssm->d_B_m); cudaFree(ssm->d_B_v);
     cudaFree(ssm->d_C_m); cudaFree(ssm->d_C_v); cudaFree(ssm->d_D_m); cudaFree(ssm->d_D_v);
     cudaFree(ssm->d_states); cudaFree(ssm->d_predictions); cudaFree(ssm->d_error); 
-    cudaFree(ssm->d_state_error); cudaFree(ssm->d_state_outputs);
+    cudaFree(ssm->d_state_error);
     
     // Destroy cuBLAS handle
     cublasDestroy(ssm->cublas_handle);
@@ -220,21 +218,7 @@ void free_ssm(SSM* ssm) {
     free(ssm);
 }
 
-// CUDA kernel for linear activation (identity)
-__global__ void linear_forward_kernel_ssm(float* output, float* input, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        output[idx] = input[idx];
-    }
-}
 
-// CUDA kernel for linear derivative (identity)
-__global__ void linear_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        grad_input[idx] = grad_output[idx];
-    }
-}
 
 // CUDA kernel for calculating error
 __global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y, int size) {
@@ -293,16 +277,12 @@ void forward_pass_ssm(SSM* ssm, float* d_X) {
                                     ssm->state_dim));
         }
         
-        // O_t = H_t (linear - no activation)
-        float* d_o_t = ssm->d_state_outputs + t * ssm->batch_size * ssm->state_dim;
-        int block_size = 256;
-        int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
-        linear_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o_t, d_h_t, ssm->batch_size * ssm->state_dim);
+        // O_t = H_t (direct use of hidden state - no separate output)
         
-        // Y_t = O_t C^T + X_t D^T
+        // Y_t = H_t C^T + X_t D^T (using hidden state directly)
         float* d_y_t = ssm->d_predictions + t * ssm->batch_size * ssm->output_dim;
         
-        // Y_t = O_t C^T
+        // Y_t = H_t C^T
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_T,
                                 CUBLAS_OP_N,
@@ -312,7 +292,7 @@ void forward_pass_ssm(SSM* ssm, float* d_X) {
                                 &alpha,
                                 ssm->d_C,
                                 ssm->state_dim,
-                                d_o_t,
+                                d_h_t,
                                 ssm->state_dim,
                                 &beta,
                                 d_y_t,
@@ -375,11 +355,10 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
     for (int t = ssm->seq_len - 1; t >= 0; t--) {
         float* d_X_t = d_X + t * ssm->batch_size * ssm->input_dim;
         float* d_h_t = ssm->d_states + t * ssm->batch_size * ssm->state_dim;
-        float* d_o_t = ssm->d_state_outputs + t * ssm->batch_size * ssm->state_dim;
         float* d_dy_t = ssm->d_error + t * ssm->batch_size * ssm->output_dim;
         float* d_dh_t = ssm->d_state_error + t * ssm->batch_size * ssm->state_dim;
         
-        // ∂L/∂C += (∂L/∂Y_t)^T O_t
+        // ∂L/∂C += (∂L/∂Y_t)^T H_t (using hidden state directly)
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_N,
                                 CUBLAS_OP_T,
@@ -387,7 +366,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 ssm->output_dim,
                                 ssm->batch_size,
                                 &alpha,
-                                d_o_t,
+                                d_h_t,
                                 ssm->state_dim,
                                 d_dy_t,
                                 ssm->output_dim,
@@ -411,8 +390,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 ssm->d_D_grad,
                                 ssm->input_dim));
         
-        // ∂L/∂O_t = (∂L/∂Y_t)C
-        float* d_do_t = d_o_t; // reuse buffer
+        // ∂L/∂H_t = (∂L/∂Y_t)C (compute gradients directly to hidden state)
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_N,
                                 CUBLAS_OP_N,
@@ -425,13 +403,10 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 d_dy_t,
                                 ssm->output_dim,
                                 &beta,
-                                d_do_t,
+                                d_dh_t,
                                 ssm->state_dim));
         
-        // ∂L/∂H_t = ∂L/∂O_t (linear - no activation derivative)
-        int block_size = 256;
-        int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
-        linear_backward_kernel_ssm<<<num_blocks, block_size>>>(d_dh_t, d_do_t, d_h_t, ssm->batch_size * ssm->state_dim);
+        // ∂L/∂H_t = ∂L/∂O_t (direct gradient - no activation derivative)
         
         // ∂L/∂H_t += (∂L/∂H_{t+1})A
         if (t < ssm->seq_len - 1) {
