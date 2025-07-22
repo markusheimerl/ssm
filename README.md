@@ -11,9 +11,9 @@ Y_t &= O_tC^T + X_tD^T
 \end{align*}
 $$
 
-The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects nonlinearly activated states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The linear state evolution $H_t = X_tB^T + H_{t-1}A^T$ enables parallel computation via scan algorithms, while the Swish activation $h\sigma(h)$ applied only to outputs preserves model expressiveness.
+The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects nonlinearly activated states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The linear state evolution $H_t = X_tB^T + H_{t-1}A^T$ enables parallel computation via scan algorithms, while the Swish activation applied later preserves model expressiveness.
 
-For gradient computation through time, we apply backpropagation through time (BPTT) with Swish derivative $\sigma(h) + h\sigma(h)(1-\sigma(h))$, where $\odot$ denotes elementwise multiplication:
+For gradient computation through time, we apply backpropagation through time (BPTT), where $\odot$ denotes elementwise multiplication:
 
 $$
 \begin{align*}
