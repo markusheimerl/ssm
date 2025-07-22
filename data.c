@@ -88,7 +88,7 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
     int** add_subtract = (int**)malloc(output_dim * sizeof(int*));
     
     for (int output_idx = 0; output_idx < output_dim; output_idx++) {
-        // Base function parameters
+        // Random number of terms between 3 and 6
         int num_terms = 3 + (rand() % 4);
         num_terms_per_output[output_idx] = num_terms;
         
@@ -101,7 +101,7 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
 
         // Randomly generate coefficients, operations, and indices
         for (int term = 0; term < num_terms; term++) {
-            coefficients[output_idx][term] = 0.05f + 0.15f * ((float)rand() / (float)RAND_MAX);
+            coefficients[output_idx][term] = 0.1f + 0.4f * ((float)rand() / (float)RAND_MAX);
             operations[output_idx][term] = rand() % 7;
             idx1[output_idx][term] = rand() % input_dim;
             idx2[output_idx][term] = rand() % input_dim;
@@ -141,9 +141,9 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
                 for (int i = 0; i < input_dim; i++) {
                     float rand_val = (float)rand() / (float)RAND_MAX;
                     float new_random = input_min + rand_val * (input_max - input_min);
-                    
-                    // 90% new random, 10% influence from previous timestep
-                    (*X)[x_idx + i] = 0.9f * new_random + 0.1f * prev_input[i];
+
+                    // 40% new random, 60% influence from previous timestep
+                    (*X)[x_idx + i] = 0.4f * new_random + 0.6f * prev_input[i];
                     prev_input[i] = (*X)[x_idx + i];
                 }
             }

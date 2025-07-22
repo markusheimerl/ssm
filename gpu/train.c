@@ -35,10 +35,10 @@ int main() {
 
     // Parameters
     const int input_dim = 16;
-    const int state_dim = 1024;
+    const int state_dim = 128;
     const int output_dim = 4;
     const int seq_len = 32;
-    const int num_sequences = 128;
+    const int num_sequences = 32;
     const int batch_size = num_sequences;
     
     // Generate synthetic sequence data
@@ -61,7 +61,7 @@ int main() {
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
     
     // Training parameters
-    const int num_epochs = 500;
+    const int num_epochs = 3000;
     const float learning_rate = 0.0003f;
     
     // Training loop
@@ -73,7 +73,7 @@ int main() {
         float loss = calculate_loss_ssm(ssm, d_y);
 
         // Print progress
-        if (epoch > 0 && epoch % 10 == 0) {
+        if (epoch > 0 && epoch % 100 == 0) {
             printf("Epoch [%d/%d], Loss: %.8f\n", epoch, num_epochs, loss);
         }
 
