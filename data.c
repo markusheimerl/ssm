@@ -1,7 +1,8 @@
 #include "data.h"
 
 static float evaluate_synthetic_function(int num_terms, const float* coefficients, const int* operations,
-                              const int* idx1, const int* idx2, const int* add_subtract, const float* x) {
+                              const int* idx1, const int* idx2, const int* add_subtract, 
+                              const int* time_lags, const float* X, int seq, int t, int seq_len, int input_dim) {
     float result = 0.0f;
     
     for (int i = 0; i < num_terms; i++) {
@@ -10,6 +11,14 @@ static float evaluate_synthetic_function(int num_terms, const float* coefficient
         int input_idx1 = idx1[i];
         int input_idx2 = idx2[i];
         int add_sub = add_subtract[i];
+        int lag = time_lags[i];
+        
+        // Skip if we don't have enough history
+        if (t < lag) continue;
+        
+        // Get input values from t-lag timestep
+        int x_base_idx = seq * seq_len * input_dim + (t - lag) * input_dim;
+        const float* x = &X[x_base_idx];
         
         float term_value = 0.0f;
         
@@ -36,7 +45,7 @@ static float evaluate_synthetic_function(int num_terms, const float* coefficient
 
 static void print_symbolic_function(int output_idx, int num_terms, const float* coefficients, 
                                   const int* operations, const int* idx1, const int* idx2, 
-                                  const int* add_subtract) {
+                                  const int* add_subtract, const int* time_lags) {
     printf("y%d = ", output_idx);
     
     for (int i = 0; i < num_terms; i++) {
@@ -45,6 +54,7 @@ static void print_symbolic_function(int output_idx, int num_terms, const float* 
         int in1 = idx1[i];
         int in2 = idx2[i];
         int add_sub = add_subtract[i];
+        int lag = time_lags[i];
         
         // Print sign
         if (i == 0) {
@@ -60,14 +70,14 @@ static void print_symbolic_function(int output_idx, int num_terms, const float* 
         
         // Print operation
         switch (op) {
-            case 0: printf("sin(2*x%d)", in1); break;
-            case 1: printf("cos(1.5*x%d)", in1); break;
-            case 2: printf("tanh(x%d + x%d)", in1, in2); break;
-            case 3: printf("exp(-x%d^2)", in1); break;
-            case 4: printf("log(|x%d| + 1)", in1); break;
-            case 5: printf("x%d^2*x%d", in1, in2); break;
-            case 6: printf("sinh(x%d-x%d)", in1, in2); break;
-            case 7: printf("x%d*sin(π*x%d)", in1, in2); break;
+            case 0: printf(lag == 0 ? "sin(2*x%d)" : "sin(2*x%d[t-%d])", in1, lag); break;
+            case 1: printf(lag == 0 ? "cos(1.5*x%d)" : "cos(1.5*x%d[t-%d])", in1, lag); break;
+            case 2: printf(lag == 0 ? "tanh(x%d + x%d)" : "tanh(x%d[t-%d] + x%d[t-%d])", in1, lag, in2, lag); break;
+            case 3: printf(lag == 0 ? "exp(-x%d^2)" : "exp(-x%d[t-%d]^2)", in1, lag); break;
+            case 4: printf(lag == 0 ? "log(|x%d| + 1)" : "log(|x%d[t-%d]| + 1)", in1, lag); break;
+            case 5: printf(lag == 0 ? "x%d^2*x%d" : "x%d[t-%d]^2*x%d[t-%d]", in1, lag, in2, lag); break;
+            case 6: printf(lag == 0 ? "sinh(x%d-x%d)" : "sinh(x%d[t-%d]-x%d[t-%d])", in1, lag, in2, lag); break;
+            case 7: printf(lag == 0 ? "x%d*sin(π*x%d)" : "x%d[t-%d]*sin(π*x%d[t-%d])", in1, lag, in2, lag); break;
         }
     }
     printf("\n");
@@ -79,6 +89,12 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
     *X = (float*)malloc(num_sequences * seq_len * input_dim * sizeof(float));
     *y = (float*)malloc(num_sequences * seq_len * output_dim * sizeof(float));
     
+    // Generate random input data
+    for (int i = 0; i < num_sequences * seq_len * input_dim; i++) {
+        float rand_val = (float)rand() / (float)RAND_MAX;
+        (*X)[i] = input_min + rand_val * (input_max - input_min);
+    }
+    
     // Create function parameters for each output dimension
     int* num_terms_per_output = (int*)malloc(output_dim * sizeof(int));
     float** coefficients = (float**)malloc(output_dim * sizeof(float*));
@@ -86,10 +102,11 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
     int** idx1 = (int**)malloc(output_dim * sizeof(int*));
     int** idx2 = (int**)malloc(output_dim * sizeof(int*));
     int** add_subtract = (int**)malloc(output_dim * sizeof(int*));
+    int** time_lags = (int**)malloc(output_dim * sizeof(int*));
     
     for (int output_idx = 0; output_idx < output_dim; output_idx++) {
-        // Random number of terms between 3 and 6
-        int num_terms = 3 + (rand() % 4);
+        // Random number of terms between 6 and 12
+        int num_terms = 6 + (rand() % 7);
         num_terms_per_output[output_idx] = num_terms;
         
         // Allocate arrays for this function's terms
@@ -98,14 +115,16 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
         idx1[output_idx] = (int*)malloc(num_terms * sizeof(int));
         idx2[output_idx] = (int*)malloc(num_terms * sizeof(int));
         add_subtract[output_idx] = (int*)malloc(num_terms * sizeof(int));
+        time_lags[output_idx] = (int*)malloc(num_terms * sizeof(int));
 
-        // Randomly generate coefficients, operations, and indices
+        // Generate random terms
         for (int term = 0; term < num_terms; term++) {
             coefficients[output_idx][term] = 0.1f + 0.4f * ((float)rand() / (float)RAND_MAX);
-            operations[output_idx][term] = rand() % 7;
+            operations[output_idx][term] = rand() % 5; // Only use simpler terms
             idx1[output_idx][term] = rand() % input_dim;
             idx2[output_idx][term] = rand() % input_dim;
             add_subtract[output_idx][term] = rand() % 2;
+            time_lags[output_idx][term] = rand() % (seq_len / 4 + 1);
         }
     }
     
@@ -114,50 +133,22 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
     for (int output_idx = 0; output_idx < output_dim; output_idx++) {
         print_symbolic_function(output_idx, num_terms_per_output[output_idx], 
                               coefficients[output_idx], operations[output_idx], 
-                              idx1[output_idx], idx2[output_idx], add_subtract[output_idx]);
+                              idx1[output_idx], idx2[output_idx], add_subtract[output_idx],
+                              time_lags[output_idx]);
     }
     printf("\n");
     
+    // Generate output data by evaluating each function
     for (int seq = 0; seq < num_sequences; seq++) {
-        float* prev_input = (float*)malloc(input_dim * sizeof(float));
-        
-        // Initialize first input state
-        for (int i = 0; i < input_dim; i++) {
-            float rand_val = (float)rand() / (float)RAND_MAX;
-            prev_input[i] = input_min + rand_val * (input_max - input_min);
-        }
-        
         for (int t = 0; t < seq_len; t++) {
-            int x_idx = seq * seq_len * input_dim + t * input_dim;
-            int y_idx = seq * seq_len * output_dim + t * output_dim;
-            
-            if (t == 0) {
-                // Use initial random values for first timestep
-                for (int i = 0; i < input_dim; i++) {
-                    (*X)[x_idx + i] = prev_input[i];
-                }
-            } else {
-                // Temporal dependency: mostly random with small influence from previous
-                for (int i = 0; i < input_dim; i++) {
-                    float rand_val = (float)rand() / (float)RAND_MAX;
-                    float new_random = input_min + rand_val * (input_max - input_min);
-
-                    // 40% new random, 60% influence from previous timestep
-                    (*X)[x_idx + i] = 0.4f * new_random + 0.6f * prev_input[i];
-                    prev_input[i] = (*X)[x_idx + i];
-                }
-            }
-            
-            // Generate outputs
             for (int j = 0; j < output_dim; j++) {
-                (*y)[y_idx + j] = evaluate_synthetic_function(num_terms_per_output[j], 
+                int y_idx = seq * seq_len * output_dim + t * output_dim + j;
+                (*y)[y_idx] = evaluate_synthetic_function(num_terms_per_output[j], 
                                                         coefficients[j], operations[j], 
-                                                        idx1[j], idx2[j], add_subtract[j], 
-                                                        &(*X)[x_idx]);
+                                                        idx1[j], idx2[j], add_subtract[j],
+                                                        time_lags[j], *X, seq, t, seq_len, input_dim);
             }
         }
-        
-        free(prev_input);
     }
     
     // Clean up
@@ -167,6 +158,7 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
         free(idx1[i]);
         free(idx2[i]);
         free(add_subtract[i]);
+        free(time_lags[i]);
     }
     free(num_terms_per_output);
     free(coefficients);
@@ -174,6 +166,7 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
     free(idx1);
     free(idx2);
     free(add_subtract);
+    free(time_lags);
 }
 
 void save_data(float* X, float* y, int num_sequences, int seq_len, int input_dim, int output_dim, const char* filename) {
