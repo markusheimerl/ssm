@@ -112,59 +112,56 @@ void free_ssm(SSM* ssm) {
     free(ssm);
 }
 
-// Forward pass
-void forward_pass_ssm(SSM* ssm, float* X) {
-    // Clear states
+// Reset hidden states to zero
+void reset_state_ssm(SSM* ssm) {
     memset(ssm->states, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float));
+}
+
+// Forward pass
+void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
+    // Get pointers to current timestep state
+    float* h_prev = (timestep > 0) ? ssm->states + (timestep - 1) * ssm->batch_size * ssm->state_dim : NULL;
+    float* h_t = ssm->states + timestep * ssm->batch_size * ssm->state_dim;
+    float* o_t = ssm->state_outputs + timestep * ssm->batch_size * ssm->state_dim;
+    float* y_t = ssm->predictions + timestep * ssm->batch_size * ssm->output_dim;
+        
+    // H_t = X_t B^T + H_{t-1} A^T
+    // H_t = X_t B^T
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                ssm->batch_size, ssm->state_dim, ssm->input_dim,
+                1.0f, X_t, ssm->input_dim,
+                ssm->B, ssm->input_dim,
+                0.0f, h_t, ssm->state_dim);
     
-    for (int t = 0; t < ssm->seq_len; t++) {
-        // Pointers to current timestep data (contiguous blocks)
-        float* X_t = X + t * ssm->batch_size * ssm->input_dim;  // (batch_size, input_dim)
-        
-        // H_t = X_t B^T + H_{t-1} A^T
-        float* h_t = ssm->states + t * ssm->batch_size * ssm->state_dim;
-        
-        // H_t = X_t B^T
+    // H_t += H_{t-1} A^T
+    if (timestep > 0) {
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                    ssm->batch_size, ssm->state_dim, ssm->input_dim,
-                    1.0f, X_t, ssm->input_dim,
-                    ssm->B, ssm->input_dim,
-                    0.0f, h_t, ssm->state_dim);
-        
-        // H_t += H_{t-1} A^T
-        if (t > 0) {
-            float* h_prev = ssm->states + (t-1) * ssm->batch_size * ssm->state_dim;
-            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                        ssm->batch_size, ssm->state_dim, ssm->state_dim,
-                        1.0f, h_prev, ssm->state_dim,
-                        ssm->A, ssm->state_dim,
-                        1.0f, h_t, ssm->state_dim);
-        }
-        
-        // O_t = H_t σ(H_t)
-        float* o_t = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim;
-        for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
-            float h = h_t[i];
-            o_t[i] = h / (1.0f + expf(-h));
-        }
-        
-        // Y_t = O_t C^T + X_t D^T
-        float* y_t = ssm->predictions + t * ssm->batch_size * ssm->output_dim;
-        
-        // Y_t = O_t C^T
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                    ssm->batch_size, ssm->output_dim, ssm->state_dim,
-                    1.0f, o_t, ssm->state_dim,
-                    ssm->C, ssm->state_dim,
-                    0.0f, y_t, ssm->output_dim);
-        
-        // Y_t += X_t D^T
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                    ssm->batch_size, ssm->output_dim, ssm->input_dim,
-                    1.0f, X_t, ssm->input_dim,
-                    ssm->D, ssm->input_dim,
-                    1.0f, y_t, ssm->output_dim);
+                    ssm->batch_size, ssm->state_dim, ssm->state_dim,
+                    1.0f, h_prev, ssm->state_dim,
+                    ssm->A, ssm->state_dim,
+                    1.0f, h_t, ssm->state_dim);
     }
+    
+    // O_t = H_t σ(H_t)
+    for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
+        float h = h_t[i];
+        o_t[i] = h / (1.0f + expf(-h));
+    }
+    
+    // Y_t = O_t C^T + X_t D^T
+    // Y_t = O_t C^T
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                ssm->batch_size, ssm->output_dim, ssm->state_dim,
+                1.0f, o_t, ssm->state_dim,
+                ssm->C, ssm->state_dim,
+                0.0f, y_t, ssm->output_dim);
+    
+    // Y_t += X_t D^T
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                ssm->batch_size, ssm->output_dim, ssm->input_dim,
+                1.0f, X_t, ssm->input_dim,
+                ssm->D, ssm->input_dim,
+                1.0f, y_t, ssm->output_dim);
 }
 
 // Calculate loss

@@ -147,6 +147,11 @@ void free_ssm(SSM* ssm) {
     free(ssm);
 }
 
+// Reset SSM state to zero
+void reset_state_ssm(SSM* ssm) {
+    CHECK_CUDA(cudaMemset(ssm->d_states, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float)));
+}
+
 // CUDA kernel for Swish activation
 __global__ void swish_forward_kernel_ssm(float* output, float* input, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -175,95 +180,57 @@ __global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y
 }
 
 // Forward pass
-void forward_pass_ssm(SSM* ssm, float* d_X) {
+void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
     const float beta_add = 1.0f;
     
-    // Clear states
-    CHECK_CUDA(cudaMemset(ssm->d_states, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float)));
+    // Get pointers to current timestep state
+    float* d_h_prev = (timestep > 0) ? ssm->d_states + (timestep - 1) * ssm->batch_size * ssm->state_dim : NULL;
+    float* d_h_t = ssm->d_states + timestep * ssm->batch_size * ssm->state_dim;
+    float* d_o_t = ssm->d_state_outputs + timestep * ssm->batch_size * ssm->state_dim;
+    float* d_y_t = ssm->d_predictions + timestep * ssm->batch_size * ssm->output_dim;
     
-    for (int t = 0; t < ssm->seq_len; t++) {
-        // Pointers to current timestep data
-        float* d_X_t = d_X + t * ssm->batch_size * ssm->input_dim;
-        float* d_h_t = ssm->d_states + t * ssm->batch_size * ssm->state_dim;
-        
-        // H_t = X_t B^T
+    // H_t = X_t B^T + H_{t-1} A^T
+    // H_t = X_t B^T
+    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            ssm->state_dim, ssm->batch_size, ssm->input_dim,
+                            &alpha, ssm->d_B, ssm->input_dim,
+                            d_X_t, ssm->input_dim,
+                            &beta, d_h_t, ssm->state_dim));
+    
+    // H_t += H_{t-1} A^T
+    if (timestep > 0) {
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
-                                CUBLAS_OP_T,
-                                CUBLAS_OP_N,
-                                ssm->state_dim,
-                                ssm->batch_size,
-                                ssm->input_dim,
-                                &alpha,
-                                ssm->d_B,
-                                ssm->input_dim,
-                                d_X_t,
-                                ssm->input_dim,
-                                &beta,
-                                d_h_t,
-                                ssm->state_dim));
-        
-        // H_t += H_{t-1} A^T
-        if (t > 0) {
-            float* d_h_prev = ssm->d_states + (t-1) * ssm->batch_size * ssm->state_dim;
-            CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
-                                    CUBLAS_OP_T,
-                                    CUBLAS_OP_N,
-                                    ssm->state_dim,
-                                    ssm->batch_size,
-                                    ssm->state_dim,
-                                    &alpha,
-                                    ssm->d_A,
-                                    ssm->state_dim,
-                                    d_h_prev,
-                                    ssm->state_dim,
-                                    &beta_add,
-                                    d_h_t,
-                                    ssm->state_dim));
-        }
-        
-        // O_t = H_t σ(H_t)
-        float* d_o_t = ssm->d_state_outputs + t * ssm->batch_size * ssm->state_dim;
-        int block_size = 256;
-        int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
-        swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o_t, d_h_t, ssm->batch_size * ssm->state_dim);
-        
-        // Y_t = O_t C^T + X_t D^T
-        float* d_y_t = ssm->d_predictions + t * ssm->batch_size * ssm->output_dim;
-        
-        // Y_t = O_t C^T
-        CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
-                                CUBLAS_OP_T,
-                                CUBLAS_OP_N,
-                                ssm->output_dim,
-                                ssm->batch_size,
-                                ssm->state_dim,
-                                &alpha,
-                                ssm->d_C,
-                                ssm->state_dim,
-                                d_o_t,
-                                ssm->state_dim,
-                                &beta,
-                                d_y_t,
-                                ssm->output_dim));
-        
-        // Y_t += X_t D^T
-        CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
-                                CUBLAS_OP_T,
-                                CUBLAS_OP_N,
-                                ssm->output_dim,
-                                ssm->batch_size,
-                                ssm->input_dim,
-                                &alpha,
-                                ssm->d_D,
-                                ssm->input_dim,
-                                d_X_t,
-                                ssm->input_dim,
-                                &beta_add,
-                                d_y_t,
-                                ssm->output_dim));
+                                CUBLAS_OP_T, CUBLAS_OP_N,
+                                ssm->state_dim, ssm->batch_size, ssm->state_dim,
+                                &alpha, ssm->d_A, ssm->state_dim,
+                                d_h_prev, ssm->state_dim,
+                                &beta_add, d_h_t, ssm->state_dim));
     }
+    
+    // O_t = H_t σ(H_t)
+    int block_size = 256;
+    int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
+    swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o_t, d_h_t, ssm->batch_size * ssm->state_dim);
+    
+    // Y_t = O_t C^T + X_t D^T
+    // Y_t = O_t C^T
+    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            ssm->output_dim, ssm->batch_size, ssm->state_dim,
+                            &alpha, ssm->d_C, ssm->state_dim,
+                            d_o_t, ssm->state_dim,
+                            &beta, d_y_t, ssm->output_dim));
+    
+    // Y_t += X_t D^T
+    CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            ssm->output_dim, ssm->batch_size, ssm->input_dim,
+                            &alpha, ssm->d_D, ssm->input_dim,
+                            d_X_t, ssm->input_dim,
+                            &beta_add, d_y_t, ssm->output_dim));
 }
 
 // Calculate loss

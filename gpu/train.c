@@ -67,7 +67,11 @@ int main() {
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
         // Forward pass
-        forward_pass_ssm(ssm, d_X);
+        reset_state_ssm(ssm);
+        for (int t = 0; t < seq_len; t++) {
+            float* d_X_t = d_X + t * batch_size * input_dim;
+            forward_pass_ssm(ssm, d_X_t, t);
+        }
         
         // Calculate loss
         float loss = calculate_loss_ssm(ssm, d_y);
@@ -110,7 +114,11 @@ int main() {
     float* predictions = (float*)malloc(seq_len * num_sequences * output_dim * sizeof(float));
 
     // Forward pass with loaded model
-    forward_pass_ssm(loaded_ssm, d_X);
+    reset_state_ssm(loaded_ssm);
+    for (int t = 0; t < seq_len; t++) {
+        float* d_X_t = d_X + t * batch_size * input_dim;
+        forward_pass_ssm(loaded_ssm, d_X_t, t);
+    }
     
     // Copy predictions from device to host
     CHECK_CUDA(cudaMemcpy(predictions, loaded_ssm->d_predictions, 

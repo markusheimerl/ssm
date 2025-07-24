@@ -62,7 +62,11 @@ int main() {
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
         // Forward pass
-        forward_pass_ssm(ssm, X_reshaped);
+        reset_state_ssm(ssm);
+        for (int t = 0; t < seq_len; t++) {
+            float* X_t = X_reshaped + t * batch_size * input_dim;
+            forward_pass_ssm(ssm, X_t, t);
+        }
         
         // Calculate loss
         float loss = calculate_loss_ssm(ssm, y_reshaped);
@@ -102,7 +106,11 @@ int main() {
     SSM* loaded_ssm = load_ssm(model_fname, batch_size);
     
     // Forward pass with loaded model
-    forward_pass_ssm(loaded_ssm, X_reshaped);
+    reset_state_ssm(loaded_ssm);
+    for (int t = 0; t < seq_len; t++) {
+        float* X_t = X_reshaped + t * batch_size * input_dim;
+        forward_pass_ssm(loaded_ssm, X_t, t);
+    }
     
     // Calculate and print loss with loaded model
     float verification_loss = calculate_loss_ssm(loaded_ssm, y_reshaped);

@@ -48,7 +48,8 @@ typedef struct {
 // Function prototypes
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
 void free_ssm(SSM* ssm);
-void forward_pass_ssm(SSM* ssm, float* X);
+void reset_state_ssm(SSM* ssm);
+void forward_pass_ssm(SSM* ssm, float* X_t, int timestep);
 float calculate_loss_ssm(SSM* ssm, float* y);
 void zero_gradients_ssm(SSM* ssm);
 void backward_pass_ssm(SSM* ssm, float* X);
