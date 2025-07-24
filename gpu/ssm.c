@@ -278,52 +278,28 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
         
         // ∂L/∂C += (∂L/∂Y_t)^T O_t
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
-                                CUBLAS_OP_N,
-                                CUBLAS_OP_T,
-                                ssm->state_dim,
-                                ssm->output_dim,
-                                ssm->batch_size,
-                                &alpha,
-                                d_o_t,
-                                ssm->state_dim,
-                                d_dy_t,
-                                ssm->output_dim,
-                                &beta_add,
-                                ssm->d_C_grad,
-                                ssm->state_dim));
+                                CUBLAS_OP_N, CUBLAS_OP_T,
+                                ssm->state_dim, ssm->output_dim, ssm->batch_size,
+                                &alpha, d_o_t, ssm->state_dim,
+                                d_dy_t, ssm->output_dim,
+                                &beta_add, ssm->d_C_grad, ssm->state_dim));
         
         // ∂L/∂D += (∂L/∂Y_t)^T X_t
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
-                                CUBLAS_OP_N,
-                                CUBLAS_OP_T,
-                                ssm->input_dim,
-                                ssm->output_dim,
-                                ssm->batch_size,
-                                &alpha,
-                                d_X_t,
-                                ssm->input_dim,
-                                d_dy_t,
-                                ssm->output_dim,
-                                &beta_add,
-                                ssm->d_D_grad,
-                                ssm->input_dim));
+                                CUBLAS_OP_N, CUBLAS_OP_T,
+                                ssm->input_dim, ssm->output_dim, ssm->batch_size,
+                                &alpha, d_X_t, ssm->input_dim,
+                                d_dy_t, ssm->output_dim,
+                                &beta_add, ssm->d_D_grad, ssm->input_dim));
         
         // ∂L/∂O_t = (∂L/∂Y_t)C
         float* d_do_t = d_o_t; // reuse buffer
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
-                                CUBLAS_OP_N,
-                                CUBLAS_OP_N,
-                                ssm->state_dim,
-                                ssm->batch_size,
-                                ssm->output_dim,
-                                &alpha,
-                                ssm->d_C,
-                                ssm->state_dim,
-                                d_dy_t,
-                                ssm->output_dim,
-                                &beta,
-                                d_do_t,
-                                ssm->state_dim));
+                                CUBLAS_OP_N, CUBLAS_OP_N,
+                                ssm->state_dim, ssm->batch_size, ssm->output_dim,
+                                &alpha, ssm->d_C, ssm->state_dim,
+                                d_dy_t, ssm->output_dim,
+                                &beta, d_do_t, ssm->state_dim));
         
         // ∂L/∂H_t = ∂L/∂O_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))]
         int block_size = 256;
@@ -334,73 +310,38 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
         if (t < ssm->seq_len - 1) {
             float* d_dh_next = ssm->d_state_error + (t+1) * ssm->batch_size * ssm->state_dim;
             CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
-                                    CUBLAS_OP_N,
-                                    CUBLAS_OP_N,
-                                    ssm->state_dim,
-                                    ssm->batch_size,
-                                    ssm->state_dim,
-                                    &alpha,
-                                    ssm->d_A,
-                                    ssm->state_dim,
-                                    d_dh_next,
-                                    ssm->state_dim,
-                                    &beta_add,
-                                    d_dh_t,
-                                    ssm->state_dim));
+                                    CUBLAS_OP_N, CUBLAS_OP_N,
+                                    ssm->state_dim, ssm->batch_size, ssm->state_dim,
+                                    &alpha, ssm->d_A, ssm->state_dim,
+                                    d_dh_next, ssm->state_dim,
+                                    &beta_add, d_dh_t, ssm->state_dim));
         }
         
         // ∂L/∂B += (∂L/∂H_t)^T X_t
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
-                                CUBLAS_OP_N,
-                                CUBLAS_OP_T,
-                                ssm->input_dim,
-                                ssm->state_dim,
-                                ssm->batch_size,
-                                &alpha,
-                                d_X_t,
-                                ssm->input_dim,
-                                d_dh_t,
-                                ssm->state_dim,
-                                &beta_add,
-                                ssm->d_B_grad,
-                                ssm->input_dim));
+                                CUBLAS_OP_N, CUBLAS_OP_T,
+                                ssm->input_dim, ssm->state_dim, ssm->batch_size,
+                                &alpha, d_X_t, ssm->input_dim,
+                                d_dh_t, ssm->state_dim,
+                                &beta_add, ssm->d_B_grad, ssm->input_dim));
         
         // ∂L/∂A += (∂L/∂H_t)^T H_{t-1}
         if (t > 0) {
             float* d_h_prev = ssm->d_states + (t-1) * ssm->batch_size * ssm->state_dim;
             CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
-                                    CUBLAS_OP_N,
-                                    CUBLAS_OP_T,
-                                    ssm->state_dim,
-                                    ssm->state_dim,
-                                    ssm->batch_size,
-                                    &alpha,
-                                    d_h_prev,
-                                    ssm->state_dim,
-                                    d_dh_t,
-                                    ssm->state_dim,
-                                    &beta_add,
-                                    ssm->d_A_grad,
-                                    ssm->state_dim));
+                                    CUBLAS_OP_N, CUBLAS_OP_T,
+                                    ssm->state_dim, ssm->state_dim, ssm->batch_size,
+                                    &alpha, d_h_prev, ssm->state_dim,
+                                    d_dh_t, ssm->state_dim,
+                                    &beta_add, ssm->d_A_grad, ssm->state_dim));
         }
     }
 }
 
 // CUDA kernel for AdamW update
-__global__ void adamw_update_kernel_ssm(
-    float* weight,
-    float* grad,
-    float* m,
-    float* v,
-    float beta1,
-    float beta2,
-    float epsilon,
-    float learning_rate,
-    float weight_decay,
-    float alpha_t,
-    int size,
-    int batch_size
-) {
+__global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v,
+                                        float beta1, float beta2, float epsilon, float learning_rate,
+                                        float weight_decay, float alpha_t, int size, int batch_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float g = grad[idx] / batch_size;
