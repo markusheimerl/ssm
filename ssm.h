@@ -52,6 +52,7 @@ void free_ssm(SSM* ssm);
 void reset_state_ssm(SSM* ssm);
 void forward_pass_ssm(SSM* ssm, float* X_t, int timestep);
 void forward_pass_ssm_parallel(SSM* ssm, float* X);
+void forward_pass_ssm_blelloch_scan(SSM* ssm, float* X);
 float calculate_loss_ssm(SSM* ssm, float* y);
 void zero_gradients_ssm(SSM* ssm);
 void backward_pass_ssm(SSM* ssm, float* X);

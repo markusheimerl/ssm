@@ -441,3 +441,179 @@ void forward_pass_ssm_parallel(SSM* ssm, float* X) {
         }
     }
 }
+
+// Helper function to multiply two affine transformation matrices
+// Each transformation represents: h_new = A * h_old + b
+// Composition: h_new = A2 * (A1 * h_old + b1) + b2 = (A2 * A1) * h_old + (A2 * b1 + b2)
+void compose_affine_transforms(float* A1, float* b1, float* A2, float* b2,
+                              float* result_A, float* result_b, int state_dim) {
+    // result_A = A2 * A1
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                state_dim, state_dim, state_dim,
+                1.0f, A2, state_dim,
+                A1, state_dim,
+                0.0f, result_A, state_dim);
+    
+    // result_b = A2 * b1 + b2
+    cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                state_dim, state_dim,
+                1.0f, A2, state_dim,
+                b1, 1,
+                0.0f, result_b, 1);
+    
+    cblas_saxpy(state_dim, 1.0f, b2, 1, result_b, 1);
+}
+
+// True Blelloch parallel scan implementation for SSM
+void forward_pass_ssm_blelloch_scan(SSM* ssm, float* X) {
+    // Clear states first
+    memset(ssm->states, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float));
+    
+    int seq_len = ssm->seq_len;
+    int batch_size = ssm->batch_size;
+    int state_dim = ssm->state_dim;
+    int input_dim = ssm->input_dim;
+    int output_dim = ssm->output_dim;
+    
+    // Process each batch element in parallel
+    #pragma omp parallel for
+    for (int b = 0; b < batch_size; b++) {
+        // Allocate temporary matrices for scan operation
+        // Each timestep is represented as an affine transformation: h_t = A_t * h_{t-1} + b_t
+        float* A_matrices = (float*)malloc(seq_len * state_dim * state_dim * sizeof(float));
+        float* b_vectors = (float*)malloc(seq_len * state_dim * sizeof(float));
+        float* temp_A = (float*)malloc(state_dim * state_dim * sizeof(float));
+        float* temp_b = (float*)malloc(state_dim * sizeof(float));
+        
+        // Step 1: Initialize transformations for each timestep
+        for (int t = 0; t < seq_len; t++) {
+            float* X_t = X + t * batch_size * input_dim + b * input_dim;
+            float* A_t = A_matrices + t * state_dim * state_dim;
+            float* b_t = b_vectors + t * state_dim;
+            
+            // A_t = A^T (the state transition matrix transposed)
+            for (int i = 0; i < state_dim; i++) {
+                for (int j = 0; j < state_dim; j++) {
+                    A_t[i * state_dim + j] = ssm->A[j * state_dim + i];
+                }
+            }
+            
+            // b_t = X_t * B^T (the input contribution)
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                       1, state_dim, input_dim,
+                       1.0f, X_t, input_dim,
+                       ssm->B, input_dim,
+                       0.0f, b_t, state_dim);
+        }
+        
+        // Step 2: Blelloch scan (up-sweep and down-sweep)
+        int n = seq_len;
+        int levels = 0;
+        int temp_n = n;
+        while (temp_n > 1) {
+            temp_n = (temp_n + 1) / 2;
+            levels++;
+        }
+        
+        // Up-sweep phase: build the tree of partial results
+        for (int level = 0; level < levels; level++) {
+            int step = 1 << (level + 1);
+            for (int i = step - 1; i < n; i += step) {
+                int left = i - (1 << level);
+                if (left >= 0) {
+                    float* A_left = A_matrices + left * state_dim * state_dim;
+                    float* b_left = b_vectors + left * state_dim;
+                    float* A_right = A_matrices + i * state_dim * state_dim;
+                    float* b_right = b_vectors + i * state_dim;
+                    
+                    // Compose: right = right ∘ left
+                    compose_affine_transforms(A_left, b_left, A_right, b_right,
+                                            temp_A, temp_b, state_dim);
+                    
+                    memcpy(A_right, temp_A, state_dim * state_dim * sizeof(float));
+                    memcpy(b_right, temp_b, state_dim * sizeof(float));
+                }
+            }
+        }
+        
+        // Clear the last element for down-sweep
+        if (n > 0) {
+            float* A_last = A_matrices + (n-1) * state_dim * state_dim;
+            float* b_last = b_vectors + (n-1) * state_dim;
+            
+            // Set to identity transformation
+            memset(A_last, 0, state_dim * state_dim * sizeof(float));
+            for (int i = 0; i < state_dim; i++) {
+                A_last[i * state_dim + i] = 1.0f;
+            }
+            memset(b_last, 0, state_dim * sizeof(float));
+        }
+        
+        // Down-sweep phase: propagate partial results
+        for (int level = levels - 1; level >= 0; level--) {
+            int step = 1 << (level + 1);
+            for (int i = step - 1; i < n; i += step) {
+                int right = i + (1 << level);
+                if (right < n) {
+                    float* A_curr = A_matrices + i * state_dim * state_dim;
+                    float* b_curr = b_vectors + i * state_dim;
+                    float* A_right = A_matrices + right * state_dim * state_dim;
+                    float* b_right = b_vectors + right * state_dim;
+                    
+                    // Save current values
+                    memcpy(temp_A, A_right, state_dim * state_dim * sizeof(float));
+                    memcpy(temp_b, b_right, state_dim * sizeof(float));
+                    
+                    // right = curr ∘ right
+                    compose_affine_transforms(temp_A, temp_b, A_curr, b_curr,
+                                            A_right, b_right, state_dim);
+                    
+                    // curr = saved right
+                    memcpy(A_curr, temp_A, state_dim * state_dim * sizeof(float));
+                    memcpy(b_curr, temp_b, state_dim * sizeof(float));
+                }
+            }
+        }
+        
+        // Step 3: Apply transformations to compute final states
+        // Since we start with h_{-1} = 0, h_t = b_t for all t
+        for (int t = 0; t < seq_len; t++) {
+            float* h_t = ssm->states + t * batch_size * state_dim + b * state_dim;
+            float* b_t = b_vectors + t * state_dim;
+            memcpy(h_t, b_t, state_dim * sizeof(float));
+        }
+        
+        // Step 4: Compute outputs for this batch element
+        for (int t = 0; t < seq_len; t++) {
+            float* X_t = X + t * batch_size * input_dim + b * input_dim;
+            float* h_t = ssm->states + t * batch_size * state_dim + b * state_dim;
+            float* o_t = ssm->state_outputs + t * batch_size * state_dim + b * state_dim;
+            float* y_t = ssm->predictions + t * batch_size * output_dim + b * output_dim;
+            
+            // O_t = H_t * σ(H_t) - apply Swish activation element-wise
+            for (int i = 0; i < state_dim; i++) {
+                float h = h_t[i];
+                o_t[i] = h / (1.0f + expf(-h));
+            }
+            
+            // Y_t = O_t * C^T
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                       1, output_dim, state_dim,
+                       1.0f, o_t, state_dim,
+                       ssm->C, state_dim,
+                       0.0f, y_t, output_dim);
+            
+            // Y_t += X_t * D^T
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                       1, output_dim, input_dim,
+                       1.0f, X_t, input_dim,
+                       ssm->D, input_dim,
+                       1.0f, y_t, output_dim);
+        }
+        
+        free(A_matrices);
+        free(b_vectors);
+        free(temp_A);
+        free(temp_b);
+    }
+}
