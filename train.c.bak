@@ -63,7 +63,7 @@ int main() {
     memcpy(ssm_parallel->D, ssm_sequential->D, output_dim * input_dim * sizeof(float));
     
     // Training parameters
-    const int num_epochs = 3000;
+    const int num_epochs = 3000;  // Back to full training
     const float learning_rate = 0.0003f;
     
     printf("\n=== SEQUENTIAL CPU TRAINING ===\n");
@@ -82,7 +82,7 @@ int main() {
         float loss = calculate_loss_ssm(ssm_sequential, y_reshaped);
 
         // Print progress
-        if (epoch > 0 && epoch % 500 == 0) {
+        if (epoch > 0 && epoch % 50 == 0) {
             printf("Sequential Epoch [%d/%d], Loss: %.8f\n", epoch, num_epochs, loss);
         }
 
@@ -100,7 +100,7 @@ int main() {
     double sequential_end = omp_get_wtime();
     double sequential_time = sequential_end - sequential_start;
     
-    printf("\n=== PARALLEL CPU TRAINING (Batch Parallelization) ===\n");
+    printf("\n=== BATCH-PARALLEL CPU TRAINING ===\n");
     double parallel_start = omp_get_wtime();
     
     // Batch-parallel training loop
@@ -113,8 +113,8 @@ int main() {
         float loss = calculate_loss_ssm(ssm_parallel, y_reshaped);
 
         // Print progress
-        if (epoch > 0 && epoch % 500 == 0) {
-            printf("Parallel Epoch [%d/%d], Loss: %.8f\n", epoch, num_epochs, loss);
+        if (epoch > 0 && epoch % 50 == 0) {
+            printf("Batch-parallel Epoch [%d/%d], Loss: %.8f\n", epoch, num_epochs, loss);
         }
 
         // Don't update weights after final evaluation
@@ -131,20 +131,49 @@ int main() {
     double parallel_end = omp_get_wtime();
     double parallel_time = parallel_end - parallel_start;
     
+    printf("\n=== BLELLOCH SCAN CPU TRAINING ===\n");
+    double blelloch_start = omp_get_wtime();
+    
+    // Blelloch scan training loop
+    for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
+        // Forward pass (Blelloch scan)
+        reset_state_ssm(ssm_blelloch);
+        forward_pass_ssm_blelloch_scan(ssm_blelloch, X_reshaped);
+        
+        // Calculate loss
+        float loss = calculate_loss_ssm(ssm_blelloch, y_reshaped);
+
+        // Print progress
+        if (epoch > 0 && epoch % 50 == 0) {
+            printf("Blelloch Epoch [%d/%d], Loss: %.8f\n", epoch, num_epochs, loss);
+        }
+
+        // Don't update weights after final evaluation
+        if (epoch == num_epochs) break;
+
+        // Backward pass
+        zero_gradients_ssm(ssm_blelloch);
+        backward_pass_ssm(ssm_blelloch, X_reshaped);
+        
+        // Update weights
+        update_weights_ssm(ssm_blelloch, learning_rate);
+    }
+    
+    double blelloch_end = omp_get_wtime();
+    double blelloch_time = blelloch_end - blelloch_start;
+    
     // Print timing results
     printf("\n=== TIMING COMPARISON ===\n");
     printf("Sequential training time:    %.3f seconds\n", sequential_time);
-    printf("Parallel training time:      %.3f seconds\n", parallel_time);
-    if (parallel_time < sequential_time) {
-        printf("Speedup achieved: %.2fx\n", sequential_time / parallel_time);
-    } else {
-        printf("No speedup: %.2fx slower\n", parallel_time / sequential_time);
-    }
+    printf("Batch-parallel training time: %.3f seconds\n", parallel_time);
+    printf("Blelloch scan training time:  %.3f seconds\n", blelloch_time);
+    printf("Batch-parallel speedup: %.2fx\n", sequential_time / parallel_time);
+    printf("Blelloch scan speedup:   %.2fx\n", sequential_time / blelloch_time);
     
     // Verify numerical correctness by comparing final predictions
     printf("\n=== NUMERICAL VERIFICATION ===\n");
     
-    // Test both models on the same data
+    // Test all models on the same data
     reset_state_ssm(ssm_sequential);
     for (int t = 0; t < seq_len; t++) {
         float* X_t = X_reshaped + t * batch_size * input_dim;
@@ -156,19 +185,27 @@ int main() {
     forward_pass_ssm_parallel(ssm_parallel, X_reshaped);
     float parallel_loss = calculate_loss_ssm(ssm_parallel, y_reshaped);
     
-    printf("Final sequential loss: %.8f\n", sequential_loss);
-    printf("Final parallel loss:   %.8f\n", parallel_loss);
-    printf("Loss difference:       %.2e\n", fabs(sequential_loss - parallel_loss));
+    reset_state_ssm(ssm_blelloch);
+    forward_pass_ssm_blelloch_scan(ssm_blelloch, X_reshaped);
+    float blelloch_loss = calculate_loss_ssm(ssm_blelloch, y_reshaped);
+    
+    printf("Final sequential loss:    %.8f\n", sequential_loss);
+    printf("Final batch-parallel loss: %.8f\n", parallel_loss);
+    printf("Final Blelloch loss:      %.8f\n", blelloch_loss);
+    printf("Batch-parallel vs Sequential diff: %.2e\n", fabs(sequential_loss - parallel_loss));
+    printf("Blelloch vs Sequential diff:       %.2e\n", fabs(sequential_loss - blelloch_loss));
     
     // Compare a few predictions to ensure they're similar
     printf("\nSample prediction comparison (first 5 outputs of first timestep):\n");
-    printf("Output | Sequential | Parallel   | Difference\n");
-    printf("-------|------------|------------|------------\n");
+    printf("Output | Sequential | Batch-Par  | Blelloch   | Diff(B-P) | Diff(Bl)\n");
+    printf("-------|------------|------------|------------|-----------|----------\n");
     for (int i = 0; i < 5 && i < ssm_sequential->output_dim; i++) {
         float seq_pred = ssm_sequential->predictions[i];
         float par_pred = ssm_parallel->predictions[i];
-        printf("%6d | %10.6f | %10.6f | %10.2e\n", 
-               i, seq_pred, par_pred, fabs(seq_pred - par_pred));
+        float bel_pred = ssm_blelloch->predictions[i];
+        printf("%6d | %10.6f | %10.6f | %10.6f | %9.2e | %8.2e\n", 
+               i, seq_pred, par_pred, bel_pred, 
+               fabs(seq_pred - par_pred), fabs(seq_pred - bel_pred));
     }
     
     // Use the sequential model for final output (as it's the reference)
