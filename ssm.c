@@ -379,3 +379,65 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     
     return ssm;
 }
+
+// Parallel forward pass using OpenMP parallelization across batch dimension
+void forward_pass_ssm_parallel(SSM* ssm, float* X) {
+    // Clear states first
+    memset(ssm->states, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float));
+    
+    int seq_len = ssm->seq_len;
+    int batch_size = ssm->batch_size;
+    int state_dim = ssm->state_dim;
+    int input_dim = ssm->input_dim;
+    int output_dim = ssm->output_dim;
+    
+    // Process each batch element in parallel
+    #pragma omp parallel for
+    for (int b = 0; b < batch_size; b++) {
+        // For each batch element, process time sequentially (due to recurrence)
+        for (int t = 0; t < seq_len; t++) {
+            float* X_t = X + t * batch_size * input_dim + b * input_dim;
+            float* h_t = ssm->states + t * batch_size * state_dim + b * state_dim;
+            float* o_t = ssm->state_outputs + t * batch_size * state_dim + b * state_dim;
+            float* y_t = ssm->predictions + t * batch_size * output_dim + b * output_dim;
+            
+            // H_t = X_t B^T - single batch element version
+            // Use sgemm with batch_size=1 to match original implementation
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        1, state_dim, input_dim,
+                        1.0f, X_t, input_dim,
+                        ssm->B, input_dim,
+                        0.0f, h_t, state_dim);
+            
+            // H_t += H_{t-1} A^T (if t > 0)
+            if (t > 0) {
+                float* h_prev = ssm->states + (t-1) * batch_size * state_dim + b * state_dim;
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                           1, state_dim, state_dim,
+                           1.0f, h_prev, state_dim,
+                           ssm->A, state_dim,
+                           1.0f, h_t, state_dim);
+            }
+            
+            // O_t = H_t * σ(H_t) - apply Swish activation element-wise
+            for (int i = 0; i < state_dim; i++) {
+                float h = h_t[i];
+                o_t[i] = h / (1.0f + expf(-h));
+            }
+            
+            // Y_t = O_t * C^T
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                       1, output_dim, state_dim,
+                       1.0f, o_t, state_dim,
+                       ssm->C, state_dim,
+                       0.0f, y_t, output_dim);
+            
+            // Y_t += X_t * D^T
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                       1, output_dim, input_dim,
+                       1.0f, X_t, input_dim,
+                       ssm->D, input_dim,
+                       1.0f, y_t, output_dim);
+        }
+    }
+}

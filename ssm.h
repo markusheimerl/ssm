@@ -6,6 +6,7 @@
 #include <string.h>
 #include <math.h>
 #include <cblas.h>
+#include <omp.h>
 
 typedef struct {
     // State space matrices
@@ -50,6 +51,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
 void free_ssm(SSM* ssm);
 void reset_state_ssm(SSM* ssm);
 void forward_pass_ssm(SSM* ssm, float* X_t, int timestep);
+void forward_pass_ssm_parallel(SSM* ssm, float* X);
 float calculate_loss_ssm(SSM* ssm, float* y);
 void zero_gradients_ssm(SSM* ssm);
 void backward_pass_ssm(SSM* ssm, float* X);

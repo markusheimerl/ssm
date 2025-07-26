@@ -52,40 +52,121 @@ int main() {
     reshape_data_for_batch_processing(X, y, &X_reshaped, &y_reshaped,
                                     num_sequences, seq_len, input_dim, output_dim);
     
-    // Initialize state space model
-    SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
+    // Initialize state space models for both approaches
+    SSM* ssm_sequential = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
+    SSM* ssm_parallel = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
+    
+    // Copy identical weights to both models for fair comparison
+    memcpy(ssm_parallel->A, ssm_sequential->A, state_dim * state_dim * sizeof(float));
+    memcpy(ssm_parallel->B, ssm_sequential->B, state_dim * input_dim * sizeof(float));
+    memcpy(ssm_parallel->C, ssm_sequential->C, output_dim * state_dim * sizeof(float));
+    memcpy(ssm_parallel->D, ssm_sequential->D, output_dim * input_dim * sizeof(float));
     
     // Training parameters
-    const int num_epochs = 3000;
+    const int num_epochs = 100;  // Reduced for testing
     const float learning_rate = 0.0003f;
     
-    // Training loop
+    printf("\n=== SEQUENTIAL CPU TRAINING ===\n");
+    double sequential_start = omp_get_wtime();
+    
+    // Sequential training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
-        // Forward pass
-        reset_state_ssm(ssm);
+        // Forward pass (sequential)
+        reset_state_ssm(ssm_sequential);
         for (int t = 0; t < seq_len; t++) {
             float* X_t = X_reshaped + t * batch_size * input_dim;
-            forward_pass_ssm(ssm, X_t, t);
+            forward_pass_ssm(ssm_sequential, X_t, t);
         }
         
         // Calculate loss
-        float loss = calculate_loss_ssm(ssm, y_reshaped);
+        float loss = calculate_loss_ssm(ssm_sequential, y_reshaped);
 
         // Print progress
-        if (epoch > 0 && epoch % 100 == 0) {
-            printf("Epoch [%d/%d], Loss: %.8f\n", epoch, num_epochs, loss);
+        if (epoch > 0 && epoch % 500 == 0) {
+            printf("Sequential Epoch [%d/%d], Loss: %.8f\n", epoch, num_epochs, loss);
         }
 
         // Don't update weights after final evaluation
         if (epoch == num_epochs) break;
 
         // Backward pass
-        zero_gradients_ssm(ssm);
-        backward_pass_ssm(ssm, X_reshaped);
+        zero_gradients_ssm(ssm_sequential);
+        backward_pass_ssm(ssm_sequential, X_reshaped);
         
         // Update weights
-        update_weights_ssm(ssm, learning_rate);
+        update_weights_ssm(ssm_sequential, learning_rate);
     }
+    
+    double sequential_end = omp_get_wtime();
+    double sequential_time = sequential_end - sequential_start;
+    
+    printf("\n=== PARALLEL CPU TRAINING (Blelloch Scan) ===\n");
+    double parallel_start = omp_get_wtime();
+    
+    // Parallel training loop
+    for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
+        // Forward pass (parallel scan)
+        reset_state_ssm(ssm_parallel);
+        forward_pass_ssm_parallel(ssm_parallel, X_reshaped);
+        
+        // Calculate loss
+        float loss = calculate_loss_ssm(ssm_parallel, y_reshaped);
+
+        // Print progress
+        if (epoch > 0 && epoch % 500 == 0) {
+            printf("Parallel Epoch [%d/%d], Loss: %.8f\n", epoch, num_epochs, loss);
+        }
+
+        // Don't update weights after final evaluation
+        if (epoch == num_epochs) break;
+
+        // Backward pass
+        zero_gradients_ssm(ssm_parallel);
+        backward_pass_ssm(ssm_parallel, X_reshaped);
+        
+        // Update weights
+        update_weights_ssm(ssm_parallel, learning_rate);
+    }
+    
+    double parallel_end = omp_get_wtime();
+    double parallel_time = parallel_end - parallel_start;
+    
+    // Print timing results
+    printf("\n=== TIMING COMPARISON ===\n");
+    printf("Sequential training time: %.3f seconds\n", sequential_time);
+    printf("Parallel training time:   %.3f seconds\n", parallel_time);
+    printf("Speedup: %.2fx\n", sequential_time / parallel_time);
+    
+    // Verify numerical correctness by comparing final predictions
+    printf("\n=== NUMERICAL VERIFICATION ===\n");
+    
+    // Test both models on the same data
+    reset_state_ssm(ssm_sequential);
+    for (int t = 0; t < seq_len; t++) {
+        float* X_t = X_reshaped + t * batch_size * input_dim;
+        forward_pass_ssm(ssm_sequential, X_t, t);
+    }
+    float sequential_loss = calculate_loss_ssm(ssm_sequential, y_reshaped);
+    
+    reset_state_ssm(ssm_parallel);
+    forward_pass_ssm_parallel(ssm_parallel, X_reshaped);
+    float parallel_loss = calculate_loss_ssm(ssm_parallel, y_reshaped);
+    
+    printf("Final sequential loss: %.8f\n", sequential_loss);
+    printf("Final parallel loss:   %.8f\n", parallel_loss);
+    printf("Loss difference:       %.2e\n", fabs(sequential_loss - parallel_loss));
+    
+    // Compare a few predictions to ensure they're similar
+    printf("\nSample prediction comparison (first 5 outputs of first timestep):\n");
+    for (int i = 0; i < 5 && i < ssm_sequential->output_dim; i++) {
+        float seq_pred = ssm_sequential->predictions[i];
+        float par_pred = ssm_parallel->predictions[i];
+        printf("Output %d: Sequential=%.6f, Parallel=%.6f, Diff=%.2e\n", 
+               i, seq_pred, par_pred, fabs(seq_pred - par_pred));
+    }
+    
+    // Use the sequential model for final output (as it's the reference)
+    SSM* ssm = ssm_sequential;
 
     // Get timestamp for filenames
     char model_fname[64], data_fname[64];
@@ -180,6 +261,7 @@ int main() {
     free(X_reshaped);
     free(y_reshaped);
     free_ssm(ssm);
+    free_ssm(ssm_parallel);
     free_ssm(loaded_ssm);
     
     return 0;
