@@ -105,8 +105,8 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
     int** time_lags = (int**)malloc(output_dim * sizeof(int*));
     
     for (int output_idx = 0; output_idx < output_dim; output_idx++) {
-        // Random number of terms between 6 and 12
-        int num_terms = 6 + (rand() % 7);
+        // Random number of terms between 2 and 4 (reduced for linear model)
+        int num_terms = 2 + (rand() % 3);
         num_terms_per_output[output_idx] = num_terms;
         
         // Allocate arrays for this function's terms
@@ -117,14 +117,14 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
         add_subtract[output_idx] = (int*)malloc(num_terms * sizeof(int));
         time_lags[output_idx] = (int*)malloc(num_terms * sizeof(int));
 
-        // Generate random terms
+        // Generate random terms with gentler coefficients
         for (int term = 0; term < num_terms; term++) {
-            coefficients[output_idx][term] = 0.1f + 0.4f * ((float)rand() / (float)RAND_MAX);
-            operations[output_idx][term] = rand() % 5; // Only use simpler terms
+            coefficients[output_idx][term] = 0.05f + 0.15f * ((float)rand() / (float)RAND_MAX); // Smaller coefficients
+            operations[output_idx][term] = rand() % 3; // Only use gentler operations (sin, cos, tanh)
             idx1[output_idx][term] = rand() % input_dim;
             idx2[output_idx][term] = rand() % input_dim;
             add_subtract[output_idx][term] = rand() % 2;
-            time_lags[output_idx][term] = rand() % (seq_len / 4 + 1);
+            time_lags[output_idx][term] = rand() % 3; // Shorter time lags
         }
     }
     
