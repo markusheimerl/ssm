@@ -169,7 +169,6 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
     // Get pointers to current timestep state
     float* d_h_prev = (timestep > 0) ? ssm->d_states + (timestep - 1) * ssm->batch_size * ssm->state_dim : NULL;
     float* d_h_t = ssm->d_states + timestep * ssm->batch_size * ssm->state_dim;
-    float* d_o_t = ssm->d_state_outputs + timestep * ssm->batch_size * ssm->state_dim;
     float* d_y_t = ssm->d_predictions + timestep * ssm->batch_size * ssm->output_dim;
     
     // H_t = X_t B^T + H_{t-1} A^T
@@ -191,16 +190,13 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                                 &beta_add, d_h_t, ssm->state_dim));
     }
     
-    // O_t = H_t (identity activation)
-    CHECK_CUDA(cudaMemcpy(d_o_t, d_h_t, ssm->batch_size * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-    
-    // Y_t = O_t C^T + X_t D^T
-    // Y_t = O_t C^T
+    // Y_t = H_t C^T + X_t D^T
+    // Y_t = H_t C^T
     CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                             CUBLAS_OP_T, CUBLAS_OP_N,
                             ssm->output_dim, ssm->batch_size, ssm->state_dim,
                             &alpha, ssm->d_C, ssm->state_dim,
-                            d_o_t, ssm->state_dim,
+                            d_h_t, ssm->state_dim,
                             &beta, d_y_t, ssm->output_dim));
     
     // Y_t += X_t D^T
@@ -251,15 +247,14 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
     for (int t = ssm->seq_len - 1; t >= 0; t--) {
         float* d_X_t = d_X + t * ssm->batch_size * ssm->input_dim;
         float* d_h_t = ssm->d_states + t * ssm->batch_size * ssm->state_dim;
-        float* d_o_t = ssm->d_state_outputs + t * ssm->batch_size * ssm->state_dim;
         float* d_dy_t = ssm->d_error + t * ssm->batch_size * ssm->output_dim;
         float* d_dh_t = ssm->d_state_error + t * ssm->batch_size * ssm->state_dim;
         
-        // ∂L/∂C += (∂L/∂Y_t)^T O_t
+        // ∂L/∂C += (∂L/∂Y_t)^T H_t
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_N, CUBLAS_OP_T,
                                 ssm->state_dim, ssm->output_dim, ssm->batch_size,
-                                &alpha, d_o_t, ssm->state_dim,
+                                &alpha, d_h_t, ssm->state_dim,
                                 d_dy_t, ssm->output_dim,
                                 &beta_add, ssm->d_C_grad, ssm->state_dim));
         
@@ -271,17 +266,13 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 d_dy_t, ssm->output_dim,
                                 &beta_add, ssm->d_D_grad, ssm->input_dim));
         
-        // ∂L/∂O_t = (∂L/∂Y_t)C
-        float* d_do_t = d_o_t; // reuse buffer
+        // ∂L/∂H_t = (∂L/∂Y_t)C
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_N, CUBLAS_OP_N,
                                 ssm->state_dim, ssm->batch_size, ssm->output_dim,
                                 &alpha, ssm->d_C, ssm->state_dim,
                                 d_dy_t, ssm->output_dim,
-                                &beta, d_do_t, ssm->state_dim));
-        
-        // ∂L/∂H_t = ∂L/∂O_t (identity activation derivative)
-        CHECK_CUDA(cudaMemcpy(d_dh_t, d_do_t, ssm->batch_size * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+                                &beta, d_dh_t, ssm->state_dim));
         
         // ∂L/∂H_t += (∂L/∂H_{t+1})A
         if (t < ssm->seq_len - 1) {
