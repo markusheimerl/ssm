@@ -23,14 +23,9 @@ static float evaluate_synthetic_function(int num_terms, const float* coefficient
         float term_value = 0.0f;
         
         switch (operation) {
-            case 0: term_value = coefficient * sinf(x[input_idx1] * 2.0f); break;
-            case 1: term_value = coefficient * cosf(x[input_idx1] * 1.5f); break;
-            case 2: term_value = coefficient * tanhf(x[input_idx1] + x[input_idx2]); break;
-            case 3: term_value = coefficient * expf(-powf(x[input_idx1], 2)); break;
-            case 4: term_value = coefficient * logf(fabsf(x[input_idx1]) + 1.0f); break;
-            case 5: term_value = coefficient * powf(x[input_idx1], 2) * x[input_idx2]; break;
-            case 6: term_value = coefficient * sinhf(x[input_idx1] - x[input_idx2]); break;
-            case 7: term_value = coefficient * x[input_idx1] * sinf(x[input_idx2] * M_PI); break;
+            case 0: term_value = coefficient * x[input_idx1]; break;
+            case 1: term_value = coefficient * (x[input_idx1] + x[input_idx2]); break;
+            case 2: term_value = coefficient * (x[input_idx1] - x[input_idx2]); break;
         }
         
         if (add_sub == 0) {
@@ -70,14 +65,27 @@ static void print_symbolic_function(int output_idx, int num_terms, const float* 
         
         // Print operation
         switch (op) {
-            case 0: printf(lag == 0 ? "sin(2*x%d)" : "sin(2*x%d[t-%d])", in1, lag); break;
-            case 1: printf(lag == 0 ? "cos(1.5*x%d)" : "cos(1.5*x%d[t-%d])", in1, lag); break;
-            case 2: printf(lag == 0 ? "tanh(x%d + x%d)" : "tanh(x%d[t-%d] + x%d[t-%d])", in1, lag, in2, lag); break;
-            case 3: printf(lag == 0 ? "exp(-x%d^2)" : "exp(-x%d[t-%d]^2)", in1, lag); break;
-            case 4: printf(lag == 0 ? "log(|x%d| + 1)" : "log(|x%d[t-%d]| + 1)", in1, lag); break;
-            case 5: printf(lag == 0 ? "x%d^2*x%d" : "x%d[t-%d]^2*x%d[t-%d]", in1, lag, in2, lag); break;
-            case 6: printf(lag == 0 ? "sinh(x%d-x%d)" : "sinh(x%d[t-%d]-x%d[t-%d])", in1, lag, in2, lag); break;
-            case 7: printf(lag == 0 ? "x%d*sin(π*x%d)" : "x%d[t-%d]*sin(π*x%d[t-%d])", in1, lag, in2, lag); break;
+            case 0: 
+                if (lag == 0) {
+                    printf("x%d", in1);
+                } else {
+                    printf("x%d[t-%d]", in1, lag);
+                }
+                break;
+            case 1: 
+                if (lag == 0) {
+                    printf("(x%d + x%d)", in1, in2);
+                } else {
+                    printf("(x%d[t-%d] + x%d[t-%d])", in1, lag, in2, lag);
+                }
+                break;
+            case 2: 
+                if (lag == 0) {
+                    printf("(x%d - x%d)", in1, in2);
+                } else {
+                    printf("(x%d[t-%d] - x%d[t-%d])", in1, lag, in2, lag);
+                }
+                break;
         }
     }
     printf("\n");
@@ -120,7 +128,7 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
         // Generate random terms with gentler coefficients
         for (int term = 0; term < num_terms; term++) {
             coefficients[output_idx][term] = 0.05f + 0.15f * ((float)rand() / (float)RAND_MAX); // Smaller coefficients
-            operations[output_idx][term] = rand() % 3; // Only use gentler operations (sin, cos, tanh)
+            operations[output_idx][term] = rand() % 3; // Only use linear operations (scaling, addition, subtraction)
             idx1[output_idx][term] = rand() % input_dim;
             idx2[output_idx][term] = rand() % input_dim;
             add_subtract[output_idx][term] = rand() % 2;
