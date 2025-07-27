@@ -74,8 +74,6 @@ typedef struct {
 } SSM;
 
 // CUDA kernel prototypes
-__global__ void swish_forward_kernel_ssm(float* output, float* input, int size);
-__global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size);
 __global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y, int size);
 __global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int batch_size);
 

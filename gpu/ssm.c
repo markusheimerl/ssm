@@ -152,25 +152,6 @@ void reset_state_ssm(SSM* ssm) {
     CHECK_CUDA(cudaMemset(ssm->d_states, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float)));
 }
 
-// CUDA kernel for Swish activation
-__global__ void swish_forward_kernel_ssm(float* output, float* input, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        float x = input[idx];
-        output[idx] = x / (1.0f + expf(-x));
-    }
-}
-
-// CUDA kernel for Swish derivative
-__global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        float x = input[idx];
-        float sigmoid = 1.0f / (1.0f + expf(-x));
-        grad_input[idx] = grad_output[idx] * sigmoid * (1.0f + x * (1.0f - sigmoid));
-    }
-}
-
 // CUDA kernel for calculating error
 __global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -210,10 +191,8 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                                 &beta_add, d_h_t, ssm->state_dim));
     }
     
-    // O_t = H_t σ(H_t)
-    int block_size = 256;
-    int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
-    swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o_t, d_h_t, ssm->batch_size * ssm->state_dim);
+    // O_t = H_t (identity activation)
+    CHECK_CUDA(cudaMemcpy(d_o_t, d_h_t, ssm->batch_size * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToDevice));
     
     // Y_t = O_t C^T + X_t D^T
     // Y_t = O_t C^T
@@ -301,10 +280,8 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 d_dy_t, ssm->output_dim,
                                 &beta, d_do_t, ssm->state_dim));
         
-        // ∂L/∂H_t = ∂L/∂O_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))]
-        int block_size = 256;
-        int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
-        swish_backward_kernel_ssm<<<num_blocks, block_size>>>(d_dh_t, d_do_t, d_h_t, ssm->batch_size * ssm->state_dim);
+        // ∂L/∂H_t = ∂L/∂O_t (identity activation derivative)
+        CHECK_CUDA(cudaMemcpy(d_dh_t, d_do_t, ssm->batch_size * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
         // ∂L/∂H_t += (∂L/∂H_{t+1})A
         if (t < ssm->seq_len - 1) {
