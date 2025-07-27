@@ -1,7 +1,7 @@
 # ssm
 A state space model implementation
 
-Consider a linear state space model operating on sequential inputs of shape (seq_len × batch_size × input_dim). The architecture maintains internal states that evolve through learned linear temporal dynamics, with nonlinearity applied only in the output projection. The forward propagation follows:
+Consider a linear state space model operating on sequential inputs of shape (seq_len × batch_size × input_dim). The architecture maintains internal states that evolve through learned temporal dynamics. The forward propagation follows:
 
 $$
 \begin{align*}
