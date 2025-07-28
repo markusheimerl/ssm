@@ -5,24 +5,22 @@ Consider a linear state space model operating on sequential inputs of shape (seq
 
 $$
 \begin{align*}
-H_t &= X_tB^T + H_{t-1}A^T \\
-O_t &= H_t\sigma(H_t) \\
-Y_t &= O_tC^T + X_tD^T
+H_t &= X_tB^T + \sigma(H_{t-1}A^T) \\
+Y_t &= H_tC^T + X_tD^T
 \end{align*}
 $$
 
-The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects nonlinearly activated states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The linear state evolution $H_t = X_tB^T + H_{t-1}A^T$ enables parallel computation via scan algorithms, while the Swish activation applied later preserves model expressiveness.
+The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The modified state evolution $H_t = X_tB^T + \sigma(H_{t-1}A^T)$ applies the activation function only to the recurrent path, enabling parallel computation via scan algorithms while preserving model expressiveness through targeted nonlinearity.
 
 For gradient computation through time, we apply backpropagation through time (BPTT), where $\odot$ denotes elementwise multiplication:
 
 $$
 \begin{align*}
 \frac{\partial L}{\partial Y_t} &= Y_t - Y_{t,\text{true}} \\
-\frac{\partial L}{\partial C} &= \sum_t (\frac{\partial L}{\partial Y_t})^T O_t \\
+\frac{\partial L}{\partial C} &= \sum_t (\frac{\partial L}{\partial Y_t})^T H_t \\
 \frac{\partial L}{\partial D} &= \sum_t (\frac{\partial L}{\partial Y_t})^T X_t \\
-\frac{\partial L}{\partial O_t} &= (\frac{\partial L}{\partial Y_t})C \\
-\frac{\partial L}{\partial H_t} &= \frac{\partial L}{\partial O_t} \odot [\sigma(H_t) + H_t\sigma(H_t)(1-\sigma(H_t))] + (\frac{\partial L}{\partial H_{t+1}})A \\
-\frac{\partial L}{\partial A} &= \sum_t (\frac{\partial L}{\partial H_t})^T H_{t-1} \\
+\frac{\partial L}{\partial H_t} &= (\frac{\partial L}{\partial Y_t})C + (\frac{\partial L}{\partial H_{t+1}})A\sigma'(H_tA^T) \\
+\frac{\partial L}{\partial A} &= \sum_t (\frac{\partial L}{\partial H_{t+1}})^T \sigma'(H_tA^T) \odot H_t \\
 \frac{\partial L}{\partial B} &= \sum_t (\frac{\partial L}{\partial H_t})^T X_t
 \end{align*}
 $$
@@ -37,7 +35,7 @@ W &= (1-\lambda\eta)W - \eta\cdot\frac{m}{1-\beta_1^t}/\sqrt{\frac{v}{1-\beta_2^
 \end{align*}
 $$
 
-The implementation processes sequences through time-major matrix operations, where each timestep processes all batch sequences simultaneously via efficient BLAS operations. Each sequence evolves temporally as $H_0 \rightarrow H_1 \rightarrow \cdots \rightarrow H_{T-1}$ through purely linear dynamics, while maintaining expressiveness through nonlinear output projections.
+The implementation processes sequences through time-major matrix operations, where each timestep processes all batch sequences simultaneously via efficient BLAS operations. Each sequence evolves temporally as $H_0 \rightarrow H_1 \rightarrow \cdots \rightarrow H_{T-1}$ through dynamics that apply nonlinearity only to the recurrent connections, maintaining expressiveness while enabling efficient computation.
 
 The implementation leverages BLAS for matrix operations, enabling efficient computation on modern hardware.
 
