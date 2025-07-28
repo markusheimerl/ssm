@@ -122,37 +122,46 @@ void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
     // Get pointers to current timestep state
     float* h_prev = (timestep > 0) ? ssm->states + (timestep - 1) * ssm->batch_size * ssm->state_dim : NULL;
     float* h_t = ssm->states + timestep * ssm->batch_size * ssm->state_dim;
-    float* o_t = ssm->state_outputs + timestep * ssm->batch_size * ssm->state_dim;
+    float* temp_xb = ssm->state_outputs + timestep * ssm->batch_size * ssm->state_dim; // Reuse buffer for X_t B^T
     float* y_t = ssm->predictions + timestep * ssm->batch_size * ssm->output_dim;
         
-    // H_t = X_t B^T + H_{t-1} A^T
-    // H_t = X_t B^T
+    // Compute X_t B^T
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 ssm->batch_size, ssm->state_dim, ssm->input_dim,
                 1.0f, X_t, ssm->input_dim,
                 ssm->B, ssm->input_dim,
-                0.0f, h_t, ssm->state_dim);
+                0.0f, temp_xb, ssm->state_dim);
     
-    // H_t += H_{t-1} A^T
+    // Apply swish activation to X_t B^T: swish(x) = x * sigmoid(x) = x / (1 + exp(-x))
+    for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
+        float x = temp_xb[i];
+        temp_xb[i] = x / (1.0f + expf(-x));
+    }
+    
+    // H_t = swish(X_t B^T)
+    memcpy(h_t, temp_xb, ssm->batch_size * ssm->state_dim * sizeof(float));
+    
+    // Add swish(H_{t-1} A^T) if not first timestep
     if (timestep > 0) {
+        // Compute H_{t-1} A^T into temp_xb
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                     ssm->batch_size, ssm->state_dim, ssm->state_dim,
                     1.0f, h_prev, ssm->state_dim,
                     ssm->A, ssm->state_dim,
-                    1.0f, h_t, ssm->state_dim);
+                    0.0f, temp_xb, ssm->state_dim);
+        
+        // Apply swish activation to H_{t-1} A^T and add to H_t
+        for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
+            float x = temp_xb[i];
+            h_t[i] += x / (1.0f + expf(-x));
+        }
     }
     
-    // O_t = H_t σ(H_t)
-    for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
-        float h = h_t[i];
-        o_t[i] = h / (1.0f + expf(-h));
-    }
-    
-    // Y_t = O_t C^T + X_t D^T
-    // Y_t = O_t C^T
+    // Y_t = H_t C^T + X_t D^T
+    // Y_t = H_t C^T
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 ssm->batch_size, ssm->output_dim, ssm->state_dim,
-                1.0f, o_t, ssm->state_dim,
+                1.0f, h_t, ssm->state_dim,
                 ssm->C, ssm->state_dim,
                 0.0f, y_t, ssm->output_dim);
     
@@ -193,15 +202,14 @@ void backward_pass_ssm(SSM* ssm, float* X) {
     for (int t = ssm->seq_len - 1; t >= 0; t--) {
         float* X_t = X + t * ssm->batch_size * ssm->input_dim;
         float* h_t = ssm->states + t * ssm->batch_size * ssm->state_dim;
-        float* o_t = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim;
         float* dy_t = ssm->error + t * ssm->batch_size * ssm->output_dim;
         float* dh_t = ssm->state_error + t * ssm->batch_size * ssm->state_dim;
         
-        // ∂L/∂C += (∂L/∂Y_t)^T O_t
+        // ∂L/∂C += (∂L/∂Y_t)^T H_t
         cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                     ssm->output_dim, ssm->state_dim, ssm->batch_size,
                     1.0f, dy_t, ssm->output_dim,
-                    o_t, ssm->state_dim,
+                    h_t, ssm->state_dim,
                     1.0f, ssm->C_grad, ssm->state_dim);
         
         // ∂L/∂D += (∂L/∂Y_t)^T X_t
@@ -211,44 +219,96 @@ void backward_pass_ssm(SSM* ssm, float* X) {
                     X_t, ssm->input_dim,
                     1.0f, ssm->D_grad, ssm->input_dim);
         
-        // ∂L/∂O_t = (∂L/∂Y_t)C
-        float* do_t = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim; // reuse buffer
+        // ∂L/∂H_t = (∂L/∂Y_t)C
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                     ssm->batch_size, ssm->state_dim, ssm->output_dim,
                     1.0f, dy_t, ssm->output_dim,
                     ssm->C, ssm->state_dim,
-                    0.0f, do_t, ssm->state_dim);
+                    0.0f, dh_t, ssm->state_dim);
         
-        // ∂L/∂H_t = ∂L/∂O_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))]
-        for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
-            float h = h_t[i];
-            float sigmoid = 1.0f / (1.0f + expf(-h));
-            dh_t[i] = do_t[i] * sigmoid * (1.0f + h * (1.0f - sigmoid));
-        }
-        
-        // ∂L/∂H_t += (∂L/∂H_{t+1})A
+        // Add contribution from next timestep: ∂L/∂H_t += ∂L/∂H_{t+1} * ∂H_{t+1}/∂H_t
         if (t < ssm->seq_len - 1) {
+            float* h_prev = ssm->states + t * ssm->batch_size * ssm->state_dim;
             float* dh_next = ssm->state_error + (t+1) * ssm->batch_size * ssm->state_dim;
+            
+            // Need to compute gradient through swish(H_t A^T) in H_{t+1}
+            // First compute H_t A^T
+            float* temp_ha = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim; // reuse buffer
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        ssm->batch_size, ssm->state_dim, ssm->state_dim,
+                        1.0f, h_prev, ssm->state_dim,
+                        ssm->A, ssm->state_dim,
+                        0.0f, temp_ha, ssm->state_dim);
+            
+            // Apply swish derivative: d/dx[swish(x)] = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+            for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
+                float x = temp_ha[i];
+                float sigmoid = 1.0f / (1.0f + expf(-x));
+                float swish_grad = sigmoid * (1.0f + x * (1.0f - sigmoid));
+                temp_ha[i] = dh_next[i] * swish_grad;
+            }
+            
+            // Now backpropagate through A: ∂L/∂H_t += temp_ha * A
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                         ssm->batch_size, ssm->state_dim, ssm->state_dim,
-                        1.0f, dh_next, ssm->state_dim,
+                        1.0f, temp_ha, ssm->state_dim,
                         ssm->A, ssm->state_dim,
                         1.0f, dh_t, ssm->state_dim);
         }
         
-        // ∂L/∂B += (∂L/∂H_t)^T X_t
+        // Now compute gradients for B and A using chain rule through swish activations
+        
+        // For B: ∂L/∂B += ∂L/∂H_t * ∂H_t/∂B
+        // H_t = swish(X_t B^T) + swish(H_{t-1} A^T)
+        // ∂H_t/∂B = swish'(X_t B^T) * X_t
+        
+        // First compute X_t B^T
+        float* temp_xb = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim; // reuse buffer
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                    ssm->batch_size, ssm->state_dim, ssm->input_dim,
+                    1.0f, X_t, ssm->input_dim,
+                    ssm->B, ssm->input_dim,
+                    0.0f, temp_xb, ssm->state_dim);
+        
+        // Apply swish derivative to get ∂swish(X_t B^T)/∂(X_t B^T)
+        for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
+            float x = temp_xb[i];
+            float sigmoid = 1.0f / (1.0f + expf(-x));
+            float swish_grad = sigmoid * (1.0f + x * (1.0f - sigmoid));
+            temp_xb[i] = dh_t[i] * swish_grad;
+        }
+        
+        // ∂L/∂B += temp_xb^T * X_t
         cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                     ssm->state_dim, ssm->input_dim, ssm->batch_size,
-                    1.0f, dh_t, ssm->state_dim,
+                    1.0f, temp_xb, ssm->state_dim,
                     X_t, ssm->input_dim,
                     1.0f, ssm->B_grad, ssm->input_dim);
         
-        // ∂L/∂A += (∂L/∂H_t)^T H_{t-1}
+        // For A: ∂L/∂A += ∂L/∂H_t * ∂H_t/∂A (only if t > 0)
         if (t > 0) {
             float* h_prev = ssm->states + (t-1) * ssm->batch_size * ssm->state_dim;
+            
+            // Compute H_{t-1} A^T
+            float* temp_ha = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim; // reuse buffer
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        ssm->batch_size, ssm->state_dim, ssm->state_dim,
+                        1.0f, h_prev, ssm->state_dim,
+                        ssm->A, ssm->state_dim,
+                        0.0f, temp_ha, ssm->state_dim);
+            
+            // Apply swish derivative
+            for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
+                float x = temp_ha[i];
+                float sigmoid = 1.0f / (1.0f + expf(-x));
+                float swish_grad = sigmoid * (1.0f + x * (1.0f - sigmoid));
+                temp_ha[i] = dh_t[i] * swish_grad;
+            }
+            
+            // ∂L/∂A += temp_ha^T * H_{t-1}
             cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                         ssm->state_dim, ssm->state_dim, ssm->batch_size,
-                        1.0f, dh_t, ssm->state_dim,
+                        1.0f, temp_ha, ssm->state_dim,
                         h_prev, ssm->state_dim,
                         1.0f, ssm->A_grad, ssm->state_dim);
         }
