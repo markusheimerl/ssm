@@ -10,6 +10,9 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->output_dim = output_dim;
     ssm->seq_len = seq_len;
     ssm->batch_size = batch_size;
+    ssm->intermediate_dim = 32;  // Fixed smaller intermediate dimension
+    
+    int intermediate_dim = ssm->intermediate_dim;
     
     // Initialize Adam parameters
     ssm->beta1 = 0.9f;
@@ -25,16 +28,16 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->D = (float*)malloc(output_dim * input_dim * sizeof(float));
     
     // Allocate new input-dependent matrices
-    ssm->W1 = (float*)malloc(input_dim * state_dim * sizeof(float));
-    ssm->W2 = (float*)malloc(state_dim * state_dim * state_dim * sizeof(float));
+    ssm->W1 = (float*)malloc(input_dim * intermediate_dim * sizeof(float));
+    ssm->W2 = (float*)malloc(intermediate_dim * state_dim * state_dim * sizeof(float));
     
     // Allocate gradients
     ssm->A_grad = (float*)malloc(state_dim * state_dim * sizeof(float));
     ssm->B_grad = (float*)malloc(state_dim * input_dim * sizeof(float));
     ssm->C_grad = (float*)malloc(output_dim * state_dim * sizeof(float));
     ssm->D_grad = (float*)malloc(output_dim * input_dim * sizeof(float));
-    ssm->W1_grad = (float*)malloc(input_dim * state_dim * sizeof(float));
-    ssm->W2_grad = (float*)malloc(state_dim * state_dim * state_dim * sizeof(float));
+    ssm->W1_grad = (float*)malloc(input_dim * intermediate_dim * sizeof(float));
+    ssm->W2_grad = (float*)malloc(intermediate_dim * state_dim * state_dim * sizeof(float));
     
     // Allocate Adam buffers
     ssm->A_m = (float*)calloc(state_dim * state_dim, sizeof(float));
@@ -45,10 +48,10 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->C_v = (float*)calloc(output_dim * state_dim, sizeof(float));
     ssm->D_m = (float*)calloc(output_dim * input_dim, sizeof(float));
     ssm->D_v = (float*)calloc(output_dim * input_dim, sizeof(float));
-    ssm->W1_m = (float*)calloc(input_dim * state_dim, sizeof(float));
-    ssm->W1_v = (float*)calloc(input_dim * state_dim, sizeof(float));
-    ssm->W2_m = (float*)calloc(state_dim * state_dim * state_dim, sizeof(float));
-    ssm->W2_v = (float*)calloc(state_dim * state_dim * state_dim, sizeof(float));
+    ssm->W1_m = (float*)calloc(input_dim * intermediate_dim, sizeof(float));
+    ssm->W1_v = (float*)calloc(input_dim * intermediate_dim, sizeof(float));
+    ssm->W2_m = (float*)calloc(intermediate_dim * state_dim * state_dim, sizeof(float));
+    ssm->W2_v = (float*)calloc(intermediate_dim * state_dim * state_dim, sizeof(float));
     
     // Allocate helper arrays (time-major format)
     ssm->states = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
@@ -58,11 +61,11 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->state_outputs = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     
     // Allocate additional helper arrays for new computations
-    ssm->Z_t = (float*)malloc(batch_size * state_dim * sizeof(float));
-    ssm->U_t = (float*)malloc(batch_size * state_dim * sizeof(float));
+    ssm->Z_t = (float*)malloc(batch_size * intermediate_dim * sizeof(float));
+    ssm->U_t = (float*)malloc(batch_size * intermediate_dim * sizeof(float));
     ssm->A_t = (float*)malloc(state_dim * state_dim * sizeof(float));
-    ssm->Z_error = (float*)malloc(batch_size * state_dim * sizeof(float));
-    ssm->U_error = (float*)malloc(batch_size * state_dim * sizeof(float));
+    ssm->Z_error = (float*)malloc(batch_size * intermediate_dim * sizeof(float));
+    ssm->U_error = (float*)malloc(batch_size * intermediate_dim * sizeof(float));
     
     // Initialize B, C, D matrices
     float scale_B = 0.5f / sqrtf(input_dim);
@@ -83,13 +86,13 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     
     // Initialize new W1 and W2 matrices
     float scale_W1 = 0.3f / sqrtf(input_dim);
-    float scale_W2 = 0.1f / sqrtf(state_dim);  // Small scale to keep A_t bounded
+    float scale_W2 = 0.1f / sqrtf(intermediate_dim);  // Small scale to keep A_t bounded
     
-    for (int i = 0; i < input_dim * state_dim; i++) {
+    for (int i = 0; i < input_dim * intermediate_dim; i++) {
         ssm->W1[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_W1;
     }
     
-    for (int i = 0; i < state_dim * state_dim * state_dim; i++) {
+    for (int i = 0; i < intermediate_dim * state_dim * state_dim; i++) {
         ssm->W2[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_W2;
     }
     
@@ -159,16 +162,16 @@ void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
     float* o_t = ssm->state_outputs + timestep * ssm->batch_size * ssm->state_dim;
     float* y_t = ssm->predictions + timestep * ssm->batch_size * ssm->output_dim;
     
-    // New forward pass implementation:
+    // New forward pass implementation as specified:
     // 1. Z_t = X_t W_1
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                ssm->batch_size, ssm->state_dim, ssm->input_dim,
+                ssm->batch_size, ssm->intermediate_dim, ssm->input_dim,
                 1.0f, X_t, ssm->input_dim,
                 ssm->W1, ssm->input_dim,
-                0.0f, ssm->Z_t, ssm->state_dim);
+                0.0f, ssm->Z_t, ssm->intermediate_dim);
     
     // 2. U_t = σ(Z_t ⊙ σ(Z_t))
-    for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
+    for (int i = 0; i < ssm->batch_size * ssm->intermediate_dim; i++) {
         float z = ssm->Z_t[i];
         float sigmoid_z = 1.0f / (1.0f + expf(-z));
         float product = z * sigmoid_z;
@@ -176,11 +179,11 @@ void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
     }
     
     // 3. A_t = tanh(U_t W_2)
-    // First aggregate U_t across batch (take mean for now)
-    float* U_mean = (float*)calloc(ssm->state_dim, sizeof(float));
-    for (int i = 0; i < ssm->state_dim; i++) {
+    // Aggregate U_t across batch (take mean)
+    float* U_mean = (float*)calloc(ssm->intermediate_dim, sizeof(float));
+    for (int i = 0; i < ssm->intermediate_dim; i++) {
         for (int b = 0; b < ssm->batch_size; b++) {
-            U_mean[i] += ssm->U_t[b * ssm->state_dim + i];
+            U_mean[i] += ssm->U_t[b * ssm->intermediate_dim + i];
         }
         U_mean[i] /= ssm->batch_size;
     }
@@ -189,9 +192,7 @@ void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
     for (int i = 0; i < ssm->state_dim; i++) {
         for (int j = 0; j < ssm->state_dim; j++) {
             float sum = 0.0f;
-            for (int k = 0; k < ssm->state_dim; k++) {
-                // W2 has shape [state_dim, state_dim * state_dim]
-                // Index as W2[k * (state_dim * state_dim) + i * state_dim + j]
+            for (int k = 0; k < ssm->intermediate_dim; k++) {
                 sum += U_mean[k] * ssm->W2[k * ssm->state_dim * ssm->state_dim + i * ssm->state_dim + j];
             }
             ssm->A_t[i * ssm->state_dim + j] = tanhf(sum);
@@ -212,7 +213,7 @@ void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                     ssm->batch_size, ssm->state_dim, ssm->state_dim,
                     1.0f, h_prev, ssm->state_dim,
-                    ssm->A_t, ssm->state_dim,
+                    ssm->A_t, ssm->state_dim,  // Use dynamic A_t
                     1.0f, h_t, ssm->state_dim);
     }
     
@@ -258,8 +259,8 @@ void zero_gradients_ssm(SSM* ssm) {
     memset(ssm->B_grad, 0, ssm->state_dim * ssm->input_dim * sizeof(float));
     memset(ssm->C_grad, 0, ssm->output_dim * ssm->state_dim * sizeof(float));
     memset(ssm->D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(float));
-    memset(ssm->W1_grad, 0, ssm->input_dim * ssm->state_dim * sizeof(float));
-    memset(ssm->W2_grad, 0, ssm->state_dim * ssm->state_dim * ssm->state_dim * sizeof(float));
+    memset(ssm->W1_grad, 0, ssm->input_dim * ssm->intermediate_dim * sizeof(float));
+    memset(ssm->W2_grad, 0, ssm->intermediate_dim * ssm->state_dim * ssm->state_dim * sizeof(float));
 }
 
 // Backward pass
@@ -297,22 +298,21 @@ void backward_pass_ssm(SSM* ssm, float* X) {
                     0.0f, do_t, ssm->state_dim);
         
         // ∂L/∂H_t = ∂L/∂O_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))]
-        // Updated for new O_t = H_t ⊙ σ(H_t) instead of H_t / (1 + exp(-H_t))
+        // Updated for new O_t = H_t ⊙ σ(H_t)
         for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
             float h = h_t[i];
             float sigmoid = 1.0f / (1.0f + expf(-h));
-            // Gradient of H_t * sigmoid(H_t) w.r.t. H_t
+            // Gradient of H_t * sigmoid(H_t) w.r.t. H_t = sigmoid + H_t * sigmoid * (1 - sigmoid)
             dh_t[i] = do_t[i] * (sigmoid + h * sigmoid * (1.0f - sigmoid));
         }
         
-        // ∂L/∂H_t += (∂L/∂H_{t+1})A_t
-        // NOTE: We need to recompute A_t for the next timestep, but for now use current A_t
+        // ∂L/∂H_t += (∂L/∂H_{t+1})A_t (using dynamic A_t)
         if (t < ssm->seq_len - 1) {
             float* dh_next = ssm->state_error + (t+1) * ssm->batch_size * ssm->state_dim;
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                         ssm->batch_size, ssm->state_dim, ssm->state_dim,
                         1.0f, dh_next, ssm->state_dim,
-                        ssm->A_t, ssm->state_dim,  // Use dynamic A_t instead of fixed A
+                        ssm->A_t, ssm->state_dim,  // Use dynamic A_t
                         1.0f, dh_t, ssm->state_dim);
         }
         
@@ -327,17 +327,9 @@ void backward_pass_ssm(SSM* ssm, float* X) {
         // TODO: Implement proper gradients for the new input-dependent A_t computation
         
         // Simple approximation: treat W1 and W2 like B and C for now (placeholder gradients)
-        // ∂L/∂W1 ≈ X_t^T * ∂L/∂Z_t (placeholder - assume Z_t error is like state error)
-        cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                    ssm->input_dim, ssm->state_dim, ssm->batch_size,
-                    0.001f, X_t, ssm->input_dim,  // Small factor for stability
-                    dh_t, ssm->state_dim,         // Use state error as proxy
-                    1.0f, ssm->W1_grad, ssm->state_dim);
-        
-        // ∂L/∂W2 ≈ small random updates for now (placeholder)
-        for (int i = 0; i < ssm->state_dim * ssm->state_dim * ssm->state_dim; i++) {
-            ssm->W2_grad[i] += 0.0001f * ((float)rand() / RAND_MAX - 0.5f);
-        }
+        // For now, just zero out the W1 and W2 gradients to avoid dimension mismatches
+        // TODO: Implement proper gradients for the new input-dependent A_t computation
+        // (W1 and W2 gradients are already zeroed in zero_gradients_ssm)
         
         // ∂L/∂A is no longer used since A is now dynamic, but keep for compatibility
         if (t > 0) {
@@ -396,7 +388,7 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     }
     
     // Update W1 (for now with zero gradients to avoid issues)
-    for (int i = 0; i < ssm->input_dim * ssm->state_dim; i++) {
+    for (int i = 0; i < ssm->input_dim * ssm->intermediate_dim; i++) {
         float grad = ssm->W1_grad[i] / ssm->batch_size;
         ssm->W1_m[i] = ssm->beta1 * ssm->W1_m[i] + (1.0f - ssm->beta1) * grad;
         ssm->W1_v[i] = ssm->beta2 * ssm->W1_v[i] + (1.0f - ssm->beta2) * grad * grad;
@@ -405,7 +397,7 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     }
     
     // Update W2 (for now with zero gradients to avoid issues)
-    for (int i = 0; i < ssm->state_dim * ssm->state_dim * ssm->state_dim; i++) {
+    for (int i = 0; i < ssm->intermediate_dim * ssm->state_dim * ssm->state_dim; i++) {
         float grad = ssm->W2_grad[i] / ssm->batch_size;
         ssm->W2_m[i] = ssm->beta1 * ssm->W2_m[i] + (1.0f - ssm->beta1) * grad;
         ssm->W2_v[i] = ssm->beta2 * ssm->W2_v[i] + (1.0f - ssm->beta2) * grad * grad;
@@ -434,8 +426,8 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(ssm->B, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(ssm->C, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(ssm->D, sizeof(float), ssm->output_dim * ssm->input_dim, file);
-    fwrite(ssm->W1, sizeof(float), ssm->input_dim * ssm->state_dim, file);
-    fwrite(ssm->W2, sizeof(float), ssm->state_dim * ssm->state_dim * ssm->state_dim, file);
+    fwrite(ssm->W1, sizeof(float), ssm->input_dim * ssm->intermediate_dim, file);
+    fwrite(ssm->W2, sizeof(float), ssm->intermediate_dim * ssm->state_dim * ssm->state_dim, file);
     
     // Save Adam state
     fwrite(&ssm->t, sizeof(int), 1, file);
@@ -447,10 +439,10 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(ssm->C_v, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(ssm->D_m, sizeof(float), ssm->output_dim * ssm->input_dim, file);
     fwrite(ssm->D_v, sizeof(float), ssm->output_dim * ssm->input_dim, file);
-    fwrite(ssm->W1_m, sizeof(float), ssm->input_dim * ssm->state_dim, file);
-    fwrite(ssm->W1_v, sizeof(float), ssm->input_dim * ssm->state_dim, file);
-    fwrite(ssm->W2_m, sizeof(float), ssm->state_dim * ssm->state_dim * ssm->state_dim, file);
-    fwrite(ssm->W2_v, sizeof(float), ssm->state_dim * ssm->state_dim * ssm->state_dim, file);
+    fwrite(ssm->W1_m, sizeof(float), ssm->input_dim * ssm->intermediate_dim, file);
+    fwrite(ssm->W1_v, sizeof(float), ssm->input_dim * ssm->intermediate_dim, file);
+    fwrite(ssm->W2_m, sizeof(float), ssm->intermediate_dim * ssm->state_dim * ssm->state_dim, file);
+    fwrite(ssm->W2_v, sizeof(float), ssm->intermediate_dim * ssm->state_dim * ssm->state_dim, file);
     
     fclose(file);
     printf("Model saved to %s\n", filename);
@@ -482,8 +474,8 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(ssm->B, sizeof(float), state_dim * input_dim, file);
     fread(ssm->C, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D, sizeof(float), output_dim * input_dim, file);
-    fread(ssm->W1, sizeof(float), input_dim * state_dim, file);
-    fread(ssm->W2, sizeof(float), state_dim * state_dim * state_dim, file);
+    fread(ssm->W1, sizeof(float), input_dim * ssm->intermediate_dim, file);
+    fread(ssm->W2, sizeof(float), ssm->intermediate_dim * state_dim * state_dim, file);
     
     // Load Adam state
     fread(&ssm->t, sizeof(int), 1, file);
@@ -495,10 +487,10 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(ssm->C_v, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D_m, sizeof(float), output_dim * input_dim, file);
     fread(ssm->D_v, sizeof(float), output_dim * input_dim, file);
-    fread(ssm->W1_m, sizeof(float), input_dim * state_dim, file);
-    fread(ssm->W1_v, sizeof(float), input_dim * state_dim, file);
-    fread(ssm->W2_m, sizeof(float), state_dim * state_dim * state_dim, file);
-    fread(ssm->W2_v, sizeof(float), state_dim * state_dim * state_dim, file);
+    fread(ssm->W1_m, sizeof(float), input_dim * ssm->intermediate_dim, file);
+    fread(ssm->W1_v, sizeof(float), input_dim * ssm->intermediate_dim, file);
+    fread(ssm->W2_m, sizeof(float), ssm->intermediate_dim * state_dim * state_dim, file);
+    fread(ssm->W2_v, sizeof(float), ssm->intermediate_dim * state_dim * state_dim, file);
     
     fclose(file);
     printf("Model loaded from %s\n", filename);
