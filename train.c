@@ -42,6 +42,7 @@ int main() {
     const int seq_len = 32;
     const int num_sequences = 32;
     const int batch_size = num_sequences;
+    const int mlp_hidden_dim = 64;  // Hidden dimension for MLP
     
     // Generate synthetic sequence data
     float *X, *y;
@@ -53,7 +54,7 @@ int main() {
                                     num_sequences, seq_len, input_dim, output_dim);
     
     // Initialize state space model
-    SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
+    SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size, mlp_hidden_dim);
     
     // Training parameters
     const int num_epochs = 3000;
