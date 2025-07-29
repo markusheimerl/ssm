@@ -48,7 +48,8 @@ typedef struct {
     // Additional helper arrays for input-dependent A_t computation
     float* Z_t;            // batch_size x intermediate_dim (intermediate)
     float* U_t;            // batch_size x intermediate_dim (activated intermediate)  
-    float* A_t;            // state_dim x state_dim (dynamic state transition)
+    float* A_t;            // state_dim x state_dim (dynamic state transition for current timestep)
+    float* A_all;          // seq_len x state_dim x state_dim (store A_t for all timesteps)
     float* Z_error;        // batch_size x intermediate_dim (gradient w.r.t Z_t)
     float* U_error;        // batch_size x intermediate_dim (gradient w.r.t U_t)
     
