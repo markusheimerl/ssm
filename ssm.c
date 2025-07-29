@@ -83,8 +83,8 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     }
     
     // Initialize MLP matrices
-    float scale_W1 = 1.0f / sqrtf(input_dim);
-    float scale_W2 = 0.1f / sqrtf(mlp_hidden_dim);  // smaller for tanh stability
+    float scale_W1 = 0.5f / sqrtf(input_dim);  // Reduced from 1.0f
+    float scale_W2 = 0.05f / sqrtf(mlp_hidden_dim);  // Reduced from 0.1f for better stability
     
     for (int i = 0; i < mlp_hidden_dim * input_dim; i++) {
         ssm->W1[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_W1;

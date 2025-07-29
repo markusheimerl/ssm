@@ -57,8 +57,8 @@ int main() {
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size, mlp_hidden_dim);
     
     // Training parameters
-    const int num_epochs = 3000;
-    const float learning_rate = 0.0003f;
+    const int num_epochs = 3000;  // Full training epochs
+    const float learning_rate = 0.0001f;  // Reduced learning rate for stability
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
