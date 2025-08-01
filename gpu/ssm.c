@@ -28,10 +28,15 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     float* C = (float*)malloc(output_dim * state_dim * sizeof(float));
     float* D = (float*)malloc(output_dim * input_dim * sizeof(float));
     
-    // Initialize B, C, D matrices
+    // Initialize A, B, C, D matrices
+    float scale_A = 0.5f / sqrtf(state_dim);
     float scale_B = 0.5f / sqrtf(input_dim);
     float scale_C = 0.5f / sqrtf(state_dim);
     float scale_D = 0.1f / sqrtf(input_dim);
+
+    for (int i = 0; i < state_dim * state_dim; i++) {
+        A[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_A;
+    }
     
     for (int i = 0; i < state_dim * input_dim; i++) {
         B[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_B;
@@ -43,39 +48,6 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     
     for (int i = 0; i < output_dim * input_dim; i++) {
         D[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_D;
-    }
-    
-    // HiPPO-Leg inspired initialization for A matrix
-    // Creates a lower triangular structure optimized for memory compression
-    // and long-range dependency modeling
-    
-    // Create base lower triangular structure
-    for (int i = 0; i < state_dim; i++) {
-        for (int j = 0; j <= i; j++) {
-            if (i == j) {
-                // Diagonal: negative values that increase in magnitude with index
-                // This creates a structured forgetting pattern
-                A[i * state_dim + j] = -0.01f - (i * 0.001f / state_dim);
-            } else {
-                // Off-diagonal: small positive values that decay with distance
-                // This enables information flow between nearby state components
-                float distance = i - j;
-                A[i * state_dim + j] = 0.001f / (1.0f + distance * 0.1f);
-            }
-        }
-    }
-    
-    // Apply Legendre polynomial scaling for optimal memory compression
-    // This gives higher-order basis functions more importance
-    float norm_factor = sqrtf(2.0f * state_dim + 1.0f);
-    for (int i = 0; i < state_dim; i++) {
-        float importance = sqrtf(2.0f * i + 1.0f);
-        float normalized_importance = 1.0f + 0.1f * importance / norm_factor;
-        
-        // Scale entire row by importance factor
-        for (int j = 0; j <= i; j++) {
-            A[i * state_dim + j] *= normalized_importance;
-        }
     }
     
     // Allocate device memory for matrices
@@ -106,6 +78,8 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&ssm->d_error, seq_len * batch_size * output_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_state_error, seq_len * batch_size * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_state_outputs, seq_len * batch_size * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_tanh, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_tanh_grad, state_dim * state_dim * sizeof(float)));
     
     // Copy initialized matrices to device
     CHECK_CUDA(cudaMemcpy(ssm->d_A, A, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
@@ -140,7 +114,7 @@ void free_ssm(SSM* ssm) {
     cudaFree(ssm->d_A_m); cudaFree(ssm->d_A_v); cudaFree(ssm->d_B_m); cudaFree(ssm->d_B_v);
     cudaFree(ssm->d_C_m); cudaFree(ssm->d_C_v); cudaFree(ssm->d_D_m); cudaFree(ssm->d_D_v);
     cudaFree(ssm->d_states); cudaFree(ssm->d_predictions); cudaFree(ssm->d_error); 
-    cudaFree(ssm->d_state_error); cudaFree(ssm->d_state_outputs);
+    cudaFree(ssm->d_state_error); cudaFree(ssm->d_state_outputs); cudaFree(ssm->d_A_tanh); cudaFree(ssm->d_A_tanh_grad);
     
     // Destroy cuBLAS handle
     cublasDestroy(ssm->cublas_handle);
@@ -180,6 +154,24 @@ __global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y
     }
 }
 
+// CUDA kernel for tanh activation
+__global__ void tanh_kernel_ssm(float* output, float* input, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        output[idx] = tanhf(input[idx]);
+    }
+}
+
+// CUDA kernel for tanh derivative
+__global__ void tanh_derivative_kernel_ssm(float* grad_input, float* grad_output, float* input, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float tanh_a = tanhf(input[idx]);
+        float tanh_deriv = 1.0f - tanh_a * tanh_a;
+        grad_input[idx] = grad_output[idx] * tanh_deriv;
+    }
+}
+
 // Forward pass
 void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
     const float alpha = 1.0f;
@@ -192,7 +184,7 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
     float* d_o_t = ssm->d_state_outputs + timestep * ssm->batch_size * ssm->state_dim;
     float* d_y_t = ssm->d_predictions + timestep * ssm->batch_size * ssm->output_dim;
     
-    // H_t = X_t B^T + H_{t-1} A^T
+    // H_t = X_t B^T + H_{t-1} tanh(A)^T
     // H_t = X_t B^T
     CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                             CUBLAS_OP_T, CUBLAS_OP_N,
@@ -201,12 +193,18 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                             d_X_t, ssm->input_dim,
                             &beta, d_h_t, ssm->state_dim));
     
-    // H_t += H_{t-1} A^T
+    // H_t += H_{t-1} tanh(A)^T
     if (timestep > 0) {
+        // Compute tanh(A) to control eigenvalues to < 1
+        int A_size = ssm->state_dim * ssm->state_dim;
+        int block_size = 256;
+        int num_blocks = (A_size + block_size - 1) / block_size;
+        tanh_kernel_ssm<<<num_blocks, block_size>>>(ssm->d_A_tanh, ssm->d_A, A_size);
+        
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 ssm->state_dim, ssm->batch_size, ssm->state_dim,
-                                &alpha, ssm->d_A, ssm->state_dim,
+                                &alpha, ssm->d_A_tanh, ssm->state_dim,
                                 d_h_prev, ssm->state_dim,
                                 &beta_add, d_h_t, ssm->state_dim));
     }
@@ -307,13 +305,20 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
         int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
         swish_backward_kernel_ssm<<<num_blocks, block_size>>>(d_dh_t, d_do_t, d_h_t, ssm->batch_size * ssm->state_dim);
         
-        // ∂L/∂H_t += (∂L/∂H_{t+1})A
+        // ∂L/∂H_t += (∂L/∂H_{t+1})tanh(A)
         if (t < ssm->seq_len - 1) {
             float* d_dh_next = ssm->d_state_error + (t+1) * ssm->batch_size * ssm->state_dim;
+            
+            // Recompute tanh(A) for backward pass
+            int A_size = ssm->state_dim * ssm->state_dim;
+            int block_size = 256;
+            int num_blocks = (A_size + block_size - 1) / block_size;
+            tanh_kernel_ssm<<<num_blocks, block_size>>>(ssm->d_A_tanh, ssm->d_A, A_size);
+            
             CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                     CUBLAS_OP_N, CUBLAS_OP_N,
                                     ssm->state_dim, ssm->batch_size, ssm->state_dim,
-                                    &alpha, ssm->d_A, ssm->state_dim,
+                                    &alpha, ssm->d_A_tanh, ssm->state_dim,
                                     d_dh_next, ssm->state_dim,
                                     &beta_add, d_dh_t, ssm->state_dim));
         }
@@ -326,15 +331,28 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 d_dh_t, ssm->state_dim,
                                 &beta_add, ssm->d_B_grad, ssm->input_dim));
         
-        // ∂L/∂A += (∂L/∂H_t)^T H_{t-1}
+        // ∂L/∂A += (∂L/∂H_t)^T H_{t-1} * ∂tanh(A)/∂A
         if (t > 0) {
             float* d_h_prev = ssm->d_states + (t-1) * ssm->batch_size * ssm->state_dim;
+            
+            // Temporary buffer for gradient w.r.t. tanh(A)
+            CHECK_CUDA(cudaMemset(ssm->d_A_tanh_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float)));
+            
             CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                     CUBLAS_OP_N, CUBLAS_OP_T,
                                     ssm->state_dim, ssm->state_dim, ssm->batch_size,
                                     &alpha, d_h_prev, ssm->state_dim,
                                     d_dh_t, ssm->state_dim,
-                                    &beta_add, ssm->d_A_grad, ssm->state_dim));
+                                    &beta, ssm->d_A_tanh_grad, ssm->state_dim));
+            
+            // Apply chain rule: ∂L/∂A = ∂L/∂tanh(A) * (1 - tanh²(A))
+            int A_size = ssm->state_dim * ssm->state_dim;
+            int block_size = 256;
+            int num_blocks = (A_size + block_size - 1) / block_size;
+            tanh_derivative_kernel_ssm<<<num_blocks, block_size>>>(ssm->d_A_tanh_grad, ssm->d_A_tanh_grad, ssm->d_A, A_size);
+            
+            // Add to A gradient
+            CHECK_CUBLAS(cublasSaxpy(ssm->cublas_handle, A_size, &alpha, ssm->d_A_tanh_grad, 1, ssm->d_A_grad, 1));
         }
     }
 }
