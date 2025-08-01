@@ -10,21 +10,36 @@
 typedef struct {
     // State space matrices
     float* A;           // state_dim x state_dim (state transition)
-    float* B;           // state_dim x input_dim (input to state)
-    float* C;           // output_dim x state_dim (state to output)
+    float* B;           // state_dim x input_dim (input to state) - will become dynamic
+    float* C;           // output_dim x state_dim (state to output) - will become dynamic
     float* D;           // output_dim x input_dim (input to output)
+    
+    // Linear projection weights for selective SSM (making B, C input-dependent)
+    float* W_B;         // (state_dim * input_dim) x input_dim (projects X_t to B_t)
+    float* b_B;         // state_dim * input_dim (bias for B projection)
+    float* W_C;         // (output_dim * state_dim) x input_dim (projects X_t to C_t)
+    float* b_C;         // output_dim * state_dim (bias for C projection)
     
     // Gradients
     float* A_grad;      // state_dim x state_dim
     float* B_grad;      // state_dim x input_dim
     float* C_grad;      // output_dim x state_dim
     float* D_grad;      // output_dim x input_dim
+    float* W_B_grad;    // (state_dim * input_dim) x input_dim
+    float* b_B_grad;    // state_dim * input_dim
+    float* W_C_grad;    // (output_dim * state_dim) x input_dim
+    float* b_C_grad;    // output_dim * state_dim
     
     // Adam parameters for A, B, C, D
     float* A_m; float* A_v;
     float* B_m; float* B_v;
     float* C_m; float* C_v;
     float* D_m; float* D_v;
+    // Adam parameters for projection weights
+    float* W_B_m; float* W_B_v;
+    float* b_B_m; float* b_B_v;
+    float* W_C_m; float* W_C_v;
+    float* b_C_m; float* b_C_v;
     
     float beta1, beta2, epsilon;
     int t;
