@@ -20,6 +20,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     
     // Initialize cuBLAS
     CHECK_CUBLAS(cublasCreate(&ssm->cublas_handle));
+    CHECK_CUBLAS(cublasSetMathMode(ssm->cublas_handle, CUBLAS_TENSOR_OP_MATH));
     
     // Allocate host memory for initialization
     float* A = (float*)calloc(state_dim * state_dim, sizeof(float));
