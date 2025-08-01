@@ -46,6 +46,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->error = (float*)malloc(seq_len * batch_size * output_dim * sizeof(float));
     ssm->state_error = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     ssm->state_outputs = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
+    ssm->A_tanh = (float*)malloc(state_dim * state_dim * sizeof(float));
     
     // Initialize B, C, D matrices
     float scale_B = 0.5f / sqrtf(input_dim);
@@ -64,38 +65,12 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
         ssm->D[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_D;
     }
     
-    // HiPPO-Leg inspired initialization for A matrix
-    // Creates a lower triangular structure optimized for memory compression
-    // and long-range dependency modeling
-    // Note: A is already zero-initialized by calloc above
+    // Initialize A matrix with normal random values like other matrices
+    // Use tanh activation to control eigenvalues to << 1
+    float scale_A = 0.5f / sqrtf(state_dim);
     
-    // Phase 1: Create base lower triangular structure
-    for (int i = 0; i < state_dim; i++) {
-        for (int j = 0; j <= i; j++) {
-            if (i == j) {
-                // Diagonal: negative values that increase in magnitude with index
-                // This creates a structured forgetting pattern
-                ssm->A[i * state_dim + j] = -0.01f - (i * 0.001f / state_dim);
-            } else {
-                // Off-diagonal: small positive values that decay with distance
-                // This enables information flow between nearby state components
-                float distance = i - j;
-                ssm->A[i * state_dim + j] = 0.001f / (1.0f + distance * 0.1f);
-            }
-        }
-    }
-    
-    // Phase 2: Apply Legendre polynomial scaling for optimal memory compression
-    // This gives higher-order basis functions more importance
-    float norm_factor = sqrtf(2.0f * state_dim + 1.0f);
-    for (int i = 0; i < state_dim; i++) {
-        float importance = sqrtf(2.0f * i + 1.0f);
-        float normalized_importance = 1.0f + 0.1f * importance / norm_factor;
-        
-        // Scale entire row by importance factor
-        for (int j = 0; j <= i; j++) {
-            ssm->A[i * state_dim + j] *= normalized_importance;
-        }
+    for (int i = 0; i < state_dim * state_dim; i++) {
+        ssm->A[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_A;
     }
     
     return ssm;
@@ -108,7 +83,7 @@ void free_ssm(SSM* ssm) {
     free(ssm->A_m); free(ssm->A_v); free(ssm->B_m); free(ssm->B_v);
     free(ssm->C_m); free(ssm->C_v); free(ssm->D_m); free(ssm->D_v);
     free(ssm->states); free(ssm->predictions); free(ssm->error); free(ssm->state_error);
-    free(ssm->state_outputs);
+    free(ssm->state_outputs); free(ssm->A_tanh);
     free(ssm);
 }
 
@@ -133,12 +108,17 @@ void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
                 ssm->B, ssm->input_dim,
                 0.0f, h_t, ssm->state_dim);
     
-    // H_t += H_{t-1} A^T
+    // H_t += H_{t-1} tanh(A)^T (apply tanh to control eigenvalues)
     if (timestep > 0) {
+        // Compute tanh(A) to control eigenvalues to << 1
+        for (int i = 0; i < ssm->state_dim * ssm->state_dim; i++) {
+            ssm->A_tanh[i] = tanhf(ssm->A[i]);
+        }
+        
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                     ssm->batch_size, ssm->state_dim, ssm->state_dim,
                     1.0f, h_prev, ssm->state_dim,
-                    ssm->A, ssm->state_dim,
+                    ssm->A_tanh, ssm->state_dim,
                     1.0f, h_t, ssm->state_dim);
     }
     
@@ -226,13 +206,19 @@ void backward_pass_ssm(SSM* ssm, float* X) {
             dh_t[i] = do_t[i] * sigmoid * (1.0f + h * (1.0f - sigmoid));
         }
         
-        // ∂L/∂H_t += (∂L/∂H_{t+1})A
+        // ∂L/∂H_t += (∂L/∂H_{t+1})tanh(A) (use tanh(A) for consistency)
         if (t < ssm->seq_len - 1) {
             float* dh_next = ssm->state_error + (t+1) * ssm->batch_size * ssm->state_dim;
+            
+            // Recompute tanh(A) for backward pass
+            for (int i = 0; i < ssm->state_dim * ssm->state_dim; i++) {
+                ssm->A_tanh[i] = tanhf(ssm->A[i]);
+            }
+            
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                         ssm->batch_size, ssm->state_dim, ssm->state_dim,
                         1.0f, dh_next, ssm->state_dim,
-                        ssm->A, ssm->state_dim,
+                        ssm->A_tanh, ssm->state_dim,
                         1.0f, dh_t, ssm->state_dim);
         }
         
@@ -243,14 +229,26 @@ void backward_pass_ssm(SSM* ssm, float* X) {
                     X_t, ssm->input_dim,
                     1.0f, ssm->B_grad, ssm->input_dim);
         
-        // ∂L/∂A += (∂L/∂H_t)^T H_{t-1}
+        // ∂L/∂A += (∂L/∂H_t)^T H_{t-1} * ∂tanh(A)/∂A
         if (t > 0) {
             float* h_prev = ssm->states + (t-1) * ssm->batch_size * ssm->state_dim;
+            
+            // Temporary buffer for gradient w.r.t. tanh(A)
+            float* temp_grad = ssm->A_tanh; // reuse A_tanh buffer for temp storage
+            memset(temp_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float));
+            
             cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                         ssm->state_dim, ssm->state_dim, ssm->batch_size,
                         1.0f, dh_t, ssm->state_dim,
                         h_prev, ssm->state_dim,
-                        1.0f, ssm->A_grad, ssm->state_dim);
+                        0.0f, temp_grad, ssm->state_dim);
+            
+            // Apply chain rule: ∂L/∂A = ∂L/∂tanh(A) * (1 - tanh²(A))
+            for (int i = 0; i < ssm->state_dim * ssm->state_dim; i++) {
+                float tanh_a = tanhf(ssm->A[i]);
+                float tanh_deriv = 1.0f - tanh_a * tanh_a;
+                ssm->A_grad[i] += temp_grad[i] * tanh_deriv;
+            }
         }
     }
 }
