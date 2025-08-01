@@ -61,6 +61,12 @@ typedef struct {
     float* d_error;          // seq_len x batch_size x output_dim
     float* d_state_error;    // seq_len x batch_size x state_dim
     float* d_state_outputs;  // seq_len x batch_size x state_dim
+
+    // Helper arrays for eigenvalue control
+    float* d_A_tanh;         // state_dim x state_dim
+    
+    // Temporary buffer for gradient computations
+    float* d_A_tanh_grad;    // state_dim x state_dim
     
     // cuBLAS handle
     cublasHandle_t cublas_handle;
@@ -78,6 +84,8 @@ __global__ void swish_forward_kernel_ssm(float* output, float* input, int size);
 __global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size);
 __global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y, int size);
 __global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int batch_size);
+__global__ void tanh_kernel_ssm(float* output, float* input, int size);
+__global__ void tanh_derivative_kernel_ssm(float* grad_input, float* grad_output, float* input, int size);
 
 // Function prototypes
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
