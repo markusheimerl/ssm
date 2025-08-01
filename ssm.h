@@ -36,7 +36,9 @@ typedef struct {
     float* error;          // seq_len x batch_size x output_dim
     float* state_error;    // seq_len x batch_size x state_dim
     float* state_outputs;  // seq_len x batch_size x state_dim
-    float* A_tanh;         // state_dim x state_dim (tanh(A) for eigenvalue control)
+    
+    // Helper array for eigenvalue control
+    float* A_tanh;         // state_dim x state_dim
     
     // Dimensions
     int input_dim;
