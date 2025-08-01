@@ -47,6 +47,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->state_error = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     ssm->state_outputs = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     ssm->A_tanh = (float*)malloc(state_dim * state_dim * sizeof(float));
+    ssm->temp_grad_buffer = (float*)malloc(state_dim * state_dim * sizeof(float));
     
     // Initialize A, B, C, D matrices
     float scale_A = 0.5f / sqrtf(state_dim);
@@ -80,7 +81,7 @@ void free_ssm(SSM* ssm) {
     free(ssm->A_m); free(ssm->A_v); free(ssm->B_m); free(ssm->B_v);
     free(ssm->C_m); free(ssm->C_v); free(ssm->D_m); free(ssm->D_v);
     free(ssm->states); free(ssm->predictions); free(ssm->error); free(ssm->state_error);
-    free(ssm->state_outputs); free(ssm->A_tanh);
+    free(ssm->state_outputs); free(ssm->A_tanh); free(ssm->temp_grad_buffer);
     free(ssm);
 }
 
@@ -231,20 +232,19 @@ void backward_pass_ssm(SSM* ssm, float* X) {
             float* h_prev = ssm->states + (t-1) * ssm->batch_size * ssm->state_dim;
             
             // Temporary buffer for gradient w.r.t. tanh(A)
-            float* temp_grad = ssm->A_tanh; // reuse A_tanh buffer for temp storage
-            memset(temp_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float));
+            memset(ssm->temp_grad_buffer, 0, ssm->state_dim * ssm->state_dim * sizeof(float));
             
             cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                         ssm->state_dim, ssm->state_dim, ssm->batch_size,
                         1.0f, dh_t, ssm->state_dim,
                         h_prev, ssm->state_dim,
-                        0.0f, temp_grad, ssm->state_dim);
+                        0.0f, ssm->temp_grad_buffer, ssm->state_dim);
             
             // Apply chain rule: ∂L/∂A = ∂L/∂tanh(A) * (1 - tanh²(A))
             for (int i = 0; i < ssm->state_dim * ssm->state_dim; i++) {
                 float tanh_a = tanhf(ssm->A[i]);
                 float tanh_deriv = 1.0f - tanh_a * tanh_a;
-                ssm->A_grad[i] += temp_grad[i] * tanh_deriv;
+                ssm->A_grad[i] += ssm->temp_grad_buffer[i] * tanh_deriv;
             }
         }
     }

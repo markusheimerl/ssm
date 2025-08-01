@@ -40,6 +40,9 @@ typedef struct {
     // Helper array for eigenvalue control
     float* A_tanh;         // state_dim x state_dim
     
+    // Temporary buffer for gradient computations
+    float* temp_grad_buffer; // state_dim x state_dim
+    
     // Dimensions
     int input_dim;
     int state_dim;
