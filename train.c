@@ -35,12 +35,12 @@ int main() {
     srand(time(NULL));
     openblas_set_num_threads(4);
 
-    // Parameters
-    const int input_dim = 16;
-    const int state_dim = 128;
-    const int output_dim = 4;
-    const int seq_len = 32;
-    const int num_sequences = 32;
+    // Parameters - reduced for selective SSM efficiency
+    const int input_dim = 12;
+    const int state_dim = 32;
+    const int output_dim = 3;
+    const int seq_len = 16;
+    const int num_sequences = 16;
     const int batch_size = num_sequences;
     
     // Generate synthetic sequence data
@@ -55,9 +55,9 @@ int main() {
     // Initialize state space model
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
     
-    // Training parameters
-    const int num_epochs = 3000;
-    const float learning_rate = 0.0003f;
+    // Training parameters - reduced epochs for demo
+    const int num_epochs = 200;
+    const float learning_rate = 0.0005f;
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
@@ -72,7 +72,7 @@ int main() {
         float loss = calculate_loss_ssm(ssm, y_reshaped);
 
         // Print progress
-        if (epoch > 0 && epoch % 100 == 0) {
+        if (epoch > 0 && epoch % 25 == 0) {
             printf("Epoch [%d/%d], Loss: %.8f\n", epoch, num_epochs, loss);
         }
 
