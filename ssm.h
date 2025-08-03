@@ -15,10 +15,8 @@ typedef struct {
     float* D;           // output_dim x input_dim (input to output)
     
     // Input-dependent projection parameters for selective SSM
-    float* W_B;         // input_dim x state_dim x input_dim (weights for B projection)
-    float* b_B;         // state_dim x input_dim (bias for B projection)
-    float* W_C;         // input_dim x output_dim x state_dim (weights for C projection)
-    float* b_C;         // output_dim x state_dim (bias for C projection)
+    float* W_B;         // state_dim x input_dim x input_dim (weights for B projection)
+    float* W_C;         // output_dim x state_dim x input_dim (weights for C projection)
     
     // Gradients
     float* A_grad;      // state_dim x state_dim
@@ -26,9 +24,7 @@ typedef struct {
     float* C_grad;      // output_dim x state_dim (unused in selective mode)
     float* D_grad;      // output_dim x input_dim
     float* W_B_grad;    // input_dim x state_dim x input_dim
-    float* b_B_grad;    // state_dim x input_dim
     float* W_C_grad;    // input_dim x output_dim x state_dim
-    float* b_C_grad;    // output_dim x state_dim
     
     // Adam parameters for A, B, C, D (B, C unused in selective mode)
     float* A_m; float* A_v;
@@ -38,9 +34,7 @@ typedef struct {
     
     // Adam parameters for selective SSM projection parameters
     float* W_B_m; float* W_B_v;
-    float* b_B_m; float* b_B_v;
     float* W_C_m; float* W_C_v;
-    float* b_C_m; float* b_C_v;
     
     float beta1, beta2, epsilon;
     int t;
