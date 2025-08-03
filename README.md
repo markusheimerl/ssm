@@ -1,7 +1,7 @@
 # ssm
 A state space model implementation
 
-Consider a linear state space model operating on sequential inputs of shape (seq_len × batch_size × input_dim). The architecture maintains internal states that evolve through learned linear temporal dynamics, with nonlinearity applied only in the output projection. The forward propagation follows:
+Consider a linear state space model operating on sequential inputs of shape (seq_len × batch_size × input_dim). The architecture maintains internal states that evolve through learned linear temporal dynamics, with nonlinearity applied only after the recurrent path. The forward propagation follows:
 
 $$
 \begin{align*}
@@ -37,7 +37,7 @@ W &= (1-\lambda\eta)W - \eta\cdot\frac{m}{1-\beta_1^t}/\sqrt{\frac{v}{1-\beta_2^
 \end{align*}
 $$
 
-The implementation processes sequences through time-major matrix operations, where each timestep processes all batch sequences simultaneously via efficient BLAS operations. Each sequence evolves temporally as $H_0 \rightarrow H_1 \rightarrow \cdots \rightarrow H_{T-1}$ through purely linear dynamics, while maintaining expressiveness through nonlinear output projections.
+The implementation processes sequences through time-major matrix operations, where each timestep processes all batch sequences simultaneously. Each sequence evolves temporally as $H_0 \rightarrow H_1 \rightarrow \cdots \rightarrow H_{T-1}$ through purely linear dynamics, while maintaining expressiveness through nonlinear output projections.
 
 The implementation leverages BLAS for matrix operations, enabling efficient computation on modern hardware.
 
