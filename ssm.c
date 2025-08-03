@@ -167,53 +167,7 @@ void reset_state_ssm(SSM* ssm) {
     memset(ssm->states, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float));
 }
 
-// Compute input-dependent B matrix: B_t = X_t * W_B + b_B
-static void compute_B_t(SSM* ssm, float* X_t) {
-    // B_t shape: [batch_size, state_dim, input_dim]
-    // X_t shape: [batch_size, input_dim]  
-    // W_B shape: [input_dim, state_dim, input_dim]
-    // b_B shape: [state_dim, input_dim]
-    
-    // Simplified implementation - still inefficient but correct
-    for (int b = 0; b < ssm->batch_size; b++) {
-        for (int s = 0; s < ssm->state_dim; s++) {
-            for (int i = 0; i < ssm->input_dim; i++) {
-                int idx = b * ssm->state_dim * ssm->input_dim + s * ssm->input_dim + i;
-                ssm->B_t[idx] = ssm->b_B[s * ssm->input_dim + i];
-                
-                // Add X_t * W_B contribution - simplified
-                for (int j = 0; j < ssm->input_dim; j++) {
-                    ssm->B_t[idx] += X_t[b * ssm->input_dim + j] * 
-                        ssm->W_B[j * ssm->state_dim * ssm->input_dim + s * ssm->input_dim + i];
-                }
-            }
-        }
-    }
-}
 
-// Compute input-dependent C matrix: C_t = X_t * W_C + b_C  
-static void compute_C_t(SSM* ssm, float* X_t) {
-    // C_t shape: [batch_size, output_dim, state_dim]
-    // X_t shape: [batch_size, input_dim]
-    // W_C shape: [input_dim, output_dim, state_dim]  
-    // b_C shape: [output_dim, state_dim]
-    
-    // Simplified implementation - still inefficient but correct
-    for (int b = 0; b < ssm->batch_size; b++) {
-        for (int o = 0; o < ssm->output_dim; o++) {
-            for (int s = 0; s < ssm->state_dim; s++) {
-                int idx = b * ssm->output_dim * ssm->state_dim + o * ssm->state_dim + s;
-                ssm->C_t[idx] = ssm->b_C[o * ssm->state_dim + s];
-                
-                // Add X_t * W_C contribution - simplified
-                for (int i = 0; i < ssm->input_dim; i++) {
-                    ssm->C_t[idx] += X_t[b * ssm->input_dim + i] * 
-                        ssm->W_C[i * ssm->output_dim * ssm->state_dim + o * ssm->state_dim + s];
-                }
-            }
-        }
-    }
-}
 
 // Forward pass
 void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
@@ -223,20 +177,53 @@ void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
     float* o_t = ssm->state_outputs + timestep * ssm->batch_size * ssm->state_dim;
     float* y_t = ssm->predictions + timestep * ssm->batch_size * ssm->output_dim;
     
-    // Compute input-dependent matrices B_t and C_t
-    compute_B_t(ssm, X_t);
-    compute_C_t(ssm, X_t);
+    // Compute input-dependent B_t = X_t * W_B + b_B
+    // Initialize B_t with bias b_B (broadcast across batch dimension)
+    for (int b = 0; b < ssm->batch_size; b++) {
+        memcpy(ssm->B_t + b * ssm->state_dim * ssm->input_dim, 
+               ssm->b_B, ssm->state_dim * ssm->input_dim * sizeof(float));
+    }
+    
+    // Add X_t * W_B contribution using BLAS
+    // B_t[b, s, i] += sum_j(X_t[b, j] * W_B[j, s, i])
+    for (int b = 0; b < ssm->batch_size; b++) {
+        for (int s = 0; s < ssm->state_dim; s++) {
+            for (int i = 0; i < ssm->input_dim; i++) {
+                int b_idx = b * ssm->state_dim * ssm->input_dim + s * ssm->input_dim + i;
+                float* w_slice = ssm->W_B + s * ssm->input_dim * ssm->input_dim + i * ssm->input_dim;
+                ssm->B_t[b_idx] += cblas_sdot(ssm->input_dim, X_t + b * ssm->input_dim, 1, w_slice, 1);
+            }
+        }
+    }
+    
+    // Compute input-dependent C_t = X_t * W_C + b_C  
+    // Initialize C_t with bias b_C (broadcast across batch dimension)
+    for (int b = 0; b < ssm->batch_size; b++) {
+        memcpy(ssm->C_t + b * ssm->output_dim * ssm->state_dim,
+               ssm->b_C, ssm->output_dim * ssm->state_dim * sizeof(float));
+    }
+    
+    // Add X_t * W_C contribution using BLAS
+    // C_t[b, o, s] += sum_j(X_t[b, j] * W_C[j, o, s])
+    for (int b = 0; b < ssm->batch_size; b++) {
+        for (int o = 0; o < ssm->output_dim; o++) {
+            for (int s = 0; s < ssm->state_dim; s++) {
+                int c_idx = b * ssm->output_dim * ssm->state_dim + o * ssm->state_dim + s;
+                float* w_slice = ssm->W_C + o * ssm->state_dim * ssm->input_dim + s * ssm->input_dim;
+                ssm->C_t[c_idx] += cblas_sdot(ssm->input_dim, X_t + b * ssm->input_dim, 1, w_slice, 1);
+            }
+        }
+    }
     
     // H_t = X_t B_t^T + H_{t-1} A^T
     // First compute X_t B_t^T using the input-dependent B_t
     memset(h_t, 0, ssm->batch_size * ssm->state_dim * sizeof(float));
     for (int b = 0; b < ssm->batch_size; b++) {
-        for (int s = 0; s < ssm->state_dim; s++) {
-            for (int i = 0; i < ssm->input_dim; i++) {
-                h_t[b * ssm->state_dim + s] += X_t[b * ssm->input_dim + i] * 
-                    ssm->B_t[b * ssm->state_dim * ssm->input_dim + s * ssm->input_dim + i];
-            }
-        }
+        cblas_sgemv(CblasRowMajor, CblasTrans,
+                    ssm->input_dim, ssm->state_dim,
+                    1.0f, ssm->B_t + b * ssm->state_dim * ssm->input_dim, ssm->state_dim,
+                    X_t + b * ssm->input_dim, 1,
+                    1.0f, h_t + b * ssm->state_dim, 1);
     }
     
     // H_t += H_{t-1} A^T
@@ -258,12 +245,11 @@ void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
     // First compute O_t C_t^T using the input-dependent C_t
     memset(y_t, 0, ssm->batch_size * ssm->output_dim * sizeof(float));
     for (int b = 0; b < ssm->batch_size; b++) {
-        for (int o = 0; o < ssm->output_dim; o++) {
-            for (int s = 0; s < ssm->state_dim; s++) {
-                y_t[b * ssm->output_dim + o] += o_t[b * ssm->state_dim + s] * 
-                    ssm->C_t[b * ssm->output_dim * ssm->state_dim + o * ssm->state_dim + s];
-            }
-        }
+        cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                    ssm->output_dim, ssm->state_dim,
+                    1.0f, ssm->C_t + b * ssm->output_dim * ssm->state_dim, ssm->state_dim,
+                    o_t + b * ssm->state_dim, 1,
+                    1.0f, y_t + b * ssm->output_dim, 1);
     }
     
     // Y_t += X_t D^T
@@ -312,7 +298,24 @@ void backward_pass_ssm(SSM* ssm, float* X) {
         float* dh_t = ssm->state_error + t * ssm->batch_size * ssm->state_dim;
         
         // Recompute input-dependent matrices C_t for this timestep
-        compute_C_t(ssm, X_t);
+        // C_t = X_t * W_C + b_C  
+        // Initialize C_t with bias b_C (broadcast across batch dimension)
+        for (int b = 0; b < ssm->batch_size; b++) {
+            memcpy(ssm->C_t + b * ssm->output_dim * ssm->state_dim,
+                   ssm->b_C, ssm->output_dim * ssm->state_dim * sizeof(float));
+        }
+        
+        // Add X_t * W_C contribution using BLAS
+        // C_t[b, o, s] += sum_j(X_t[b, j] * W_C[j, o, s])
+        for (int b = 0; b < ssm->batch_size; b++) {
+            for (int o = 0; o < ssm->output_dim; o++) {
+                for (int s = 0; s < ssm->state_dim; s++) {
+                    int c_idx = b * ssm->output_dim * ssm->state_dim + o * ssm->state_dim + s;
+                    float* w_slice = ssm->W_C + o * ssm->state_dim * ssm->input_dim + s * ssm->input_dim;
+                    ssm->C_t[c_idx] += cblas_sdot(ssm->input_dim, X_t + b * ssm->input_dim, 1, w_slice, 1);
+                }
+            }
+        }
         
         // ∂L/∂D += (∂L/∂Y_t)^T X_t (unchanged)
         cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
@@ -371,7 +374,24 @@ void backward_pass_ssm(SSM* ssm, float* X) {
         }
         
         // Recompute input-dependent B_t for this timestep
-        compute_B_t(ssm, X_t);
+        // B_t = X_t * W_B + b_B
+        // Initialize B_t with bias b_B (broadcast across batch dimension)
+        for (int b = 0; b < ssm->batch_size; b++) {
+            memcpy(ssm->B_t + b * ssm->state_dim * ssm->input_dim, 
+                   ssm->b_B, ssm->state_dim * ssm->input_dim * sizeof(float));
+        }
+        
+        // Add X_t * W_B contribution using BLAS
+        // B_t[b, s, i] += sum_j(X_t[b, j] * W_B[j, s, i])
+        for (int b = 0; b < ssm->batch_size; b++) {
+            for (int s = 0; s < ssm->state_dim; s++) {
+                for (int i = 0; i < ssm->input_dim; i++) {
+                    int b_idx = b * ssm->state_dim * ssm->input_dim + s * ssm->input_dim + i;
+                    float* w_slice = ssm->W_B + s * ssm->input_dim * ssm->input_dim + i * ssm->input_dim;
+                    ssm->B_t[b_idx] += cblas_sdot(ssm->input_dim, X_t + b * ssm->input_dim, 1, w_slice, 1);
+                }
+            }
+        }
         
         // Compute gradients for B projection parameters
         // ∂L/∂B_t from ∂L/∂H_t (H_t = X_t B_t^T + H_{t-1} A^T)

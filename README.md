@@ -1,30 +1,17 @@
 # ssm
-A state space model implementation with **selective SSM** capability
+A state space model implementation
 
-Consider a linear state space model operating on sequential inputs of shape (seq_len × batch_size × input_dim). The architecture maintains internal states that evolve through learned linear temporal dynamics, with nonlinearity applied only in the output projection. 
-
-## Selective SSM Implementation
-
-This implementation features **input-dependent B and C matrices** via linear projections, making the SSM "selective":
-
-- **B_t = X_t W_B + b_B** (input-dependent input-to-state transformation)
-- **C_t = X_t W_C + b_C** (input-dependent state-to-output transformation)
-
-The selective forward propagation follows:
+Consider a linear state space model operating on sequential inputs of shape (seq_len × batch_size × input_dim). The architecture maintains internal states that evolve through learned linear temporal dynamics, with nonlinearity applied only in the output projection. The forward propagation follows:
 
 $$
 \begin{align*}
-B_t &= X_t W_B + b_B \\
-C_t &= X_t W_C + b_C \\
-H_t &= X_t B_t^T + H_{t-1}A^T \\
+H_t &= X_tB^T + H_{t-1}A^T \\
 O_t &= H_t\sigma(H_t) \\
-Y_t &= O_t C_t^T + X_t D^T
+Y_t &= O_tC^T + X_tD^T
 \end{align*}
 $$
 
-This allows the model to dynamically adapt its transformations based on the current input, providing greater expressiveness than fixed matrices.
-
-The state transition matrix $A$ captures temporal dependencies, projection matrices $W_B, W_C$ and biases $b_B, b_C$ enable input-dependent transformations, and feedthrough matrix $D$ provides direct input-output connections. The linear state evolution with selective matrices enables both parallel computation via scan algorithms and adaptive behavior based on input context.
+The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects nonlinearly activated states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The linear state evolution $H_t = X_tB^T + H_{t-1}A^T$ enables parallel computation via scan algorithms, while the Swish activation applied later preserves model expressiveness.
 
 For gradient computation through time, we apply backpropagation through time (BPTT), where $\odot$ denotes elementwise multiplication:
 
