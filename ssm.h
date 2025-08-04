@@ -9,19 +9,20 @@
 
 typedef struct {
     // State space matrices
-    float* A;           // state_dim x state_dim (state transition)
+    float* A_skew;      // state_dim*(state_dim-1)/2 (skew-symmetric parameters)
+    float* A_orthogonal; // state_dim x state_dim (computed from A_skew)
     float* B;           // state_dim x input_dim (input to state)
     float* C;           // output_dim x state_dim (state to output)
     float* D;           // output_dim x input_dim (input to output)
     
     // Gradients
-    float* A_grad;      // state_dim x state_dim
+    float* A_skew_grad; // state_dim*(state_dim-1)/2
     float* B_grad;      // state_dim x input_dim
     float* C_grad;      // output_dim x state_dim
     float* D_grad;      // output_dim x input_dim
     
-    // Adam parameters for A, B, C, D
-    float* A_m; float* A_v;
+    // Adam parameters for A_skew, B, C, D
+    float* A_skew_m; float* A_skew_v;
     float* B_m; float* B_v;
     float* C_m; float* C_v;
     float* D_m; float* D_v;
@@ -46,6 +47,12 @@ typedef struct {
 } SSM;
 
 // Function prototypes
+void create_skew_symmetric(float* A_skew_full, const float* A_skew_params, int n);
+void matrix_multiply(float* C, const float* A, const float* B, int n);
+void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n);
+void matrix_exponential_gradient(float* grad_A_skew, const float* grad_exp_A, 
+                                const float* A_skew_full, int n);
+
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
 void free_ssm(SSM* ssm);
 void reset_state_ssm(SSM* ssm);
