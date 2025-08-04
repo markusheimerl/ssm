@@ -11,47 +11,6 @@ __global__ void apply_givens_rotation_kernel_ssm(float* matrix, int n, int i, in
     }
 }
 
-// CUDA kernel for computing rotation gradients (single angle at a time)
-__global__ void compute_single_rotation_gradient_kernel_ssm(
-    float* rotation_grad, float* A_grad, float* A_temp, float* rotation_angles, 
-    int state_dim, int angle_idx, int rot_i, int rot_j) {
-    
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k >= state_dim) return;
-    
-    float theta = rotation_angles[angle_idx];
-    float cos_theta = cosf(theta);
-    float sin_theta = sinf(theta);
-    
-    // Compute gradient contribution for this angle
-    float grad_i_k = A_grad[rot_i * state_dim + k];
-    float grad_j_k = A_grad[rot_j * state_dim + k];
-    float a_i_k = A_temp[rot_i * state_dim + k];
-    float a_j_k = A_temp[rot_j * state_dim + k];
-    
-    // ∂/∂θ (cos(θ) * a_ik - sin(θ) * a_jk) = -sin(θ) * a_ik - cos(θ) * a_jk
-    // ∂/∂θ (sin(θ) * a_ik + cos(θ) * a_jk) = cos(θ) * a_ik - sin(θ) * a_jk
-    float grad_theta_contrib = grad_i_k * (-sin_theta * a_i_k - cos_theta * a_j_k) +
-                               grad_j_k * (cos_theta * a_i_k - sin_theta * a_j_k);
-    
-    // Use atomic add to accumulate gradient
-    atomicAdd(&rotation_grad[angle_idx], grad_theta_contrib);
-}
-
-// CUDA kernel for applying transpose Givens rotation to gradients
-__global__ void apply_transpose_givens_to_grads_kernel_ssm(
-    float* A_grad, int state_dim, int rot_i, int rot_j, float cos_theta, float sin_theta) {
-    
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k >= state_dim) return;
-    
-    float grad_i_k = A_grad[rot_i * state_dim + k];
-    float grad_j_k = A_grad[rot_j * state_dim + k];
-    
-    A_grad[rot_i * state_dim + k] = cos_theta * grad_i_k + sin_theta * grad_j_k;
-    A_grad[rot_j * state_dim + k] = -sin_theta * grad_i_k + cos_theta * grad_j_k;
-}
-
 // CUDA kernel for copying matrix
 __global__ void copy_matrix_kernel_ssm(float* dest, float* src, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -59,31 +18,7 @@ __global__ void copy_matrix_kernel_ssm(float* dest, float* src, int size) {
         dest[idx] = src[idx];
     }
 }
-// Initialize identity matrix kernel  
-__global__ void init_identity_kernel_ssm(float* matrix, int state_dim) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_size = state_dim * state_dim;
-    
-    if (idx < total_size) {
-        int i = idx / state_dim;
-        int j = idx % state_dim;
-        matrix[idx] = (i == j) ? 1.0f : 0.0f;
-    }
-}
 
-// Parallel Givens rotation kernel - applies one rotation to all columns in parallel
-__global__ void apply_parallel_givens_kernel_ssm(float* matrix, int state_dim, int row_i, int row_j, float cos_theta, float sin_theta) {
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (k < state_dim) {
-        float a_ik = matrix[row_i * state_dim + k];
-        float a_jk = matrix[row_j * state_dim + k];
-        matrix[row_i * state_dim + k] = cos_theta * a_ik - sin_theta * a_jk;
-        matrix[row_j * state_dim + k] = sin_theta * a_ik + cos_theta * a_jk;
-    }
-}
-
-// Build orthogonal matrix from rotation angles (host function)
 // Optimized kernel that builds orthogonal matrix entirely on GPU
 __global__ void build_orthogonal_optimized_kernel_ssm(float* A_orthogonal, float* rotation_angles, int state_dim) {
     extern __shared__ float sdata[];
