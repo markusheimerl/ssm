@@ -495,7 +495,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
     // Compute gradients w.r.t. rotation angles using chain rule
     compute_rotation_gradients_gpu(ssm, d_A_orthogonal_grad);
 }
-}
+
 
 // CUDA kernel for AdamW update
 __global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v,
