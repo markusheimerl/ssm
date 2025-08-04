@@ -7,6 +7,7 @@
 #include <math.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include <cusolverDn.h>
 
 // CUDA Error checking macro
 #ifndef CHECK_CUDA
@@ -26,6 +27,18 @@
     cublasStatus_t status = call; \
     if (status != CUBLAS_STATUS_SUCCESS) { \
         fprintf(stderr, "cuBLAS error in %s:%d: %d\n", __FILE__, __LINE__, \
+                (int)status); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+#endif
+
+// cuSOLVER Error checking macro
+#ifndef CHECK_CUSOLVER
+#define CHECK_CUSOLVER(call) do { \
+    cusolverStatus_t status = call; \
+    if (status != CUSOLVER_STATUS_SUCCESS) { \
+        fprintf(stderr, "cuSOLVER error in %s:%d: %d\n", __FILE__, __LINE__, \
                 (int)status); \
         exit(EXIT_FAILURE); \
     } \
@@ -63,8 +76,16 @@ typedef struct {
     float* d_state_error;    // seq_len x batch_size x state_dim
     float* d_state_outputs;  // seq_len x batch_size x state_dim
     
-    // cuBLAS handle
+    // cuBLAS and cuSOLVER handles
     cublasHandle_t cublas_handle;
+    cusolverDnHandle_t cusolver_handle;
+    
+    // Pre-allocated workspace for Cayley transform (to avoid malloc/free in forward/backward)
+    float* d_workspace_I_plus_S;   // n x n matrix  
+    float* d_workspace_I_minus_S;  // n x n matrix
+    float* d_workspace_S;          // n x n matrix
+    int* d_workspace_ipiv;         // n pivot array
+    float* d_workspace_info;       // info output
     
     // Dimensions
     int input_dim;
@@ -81,7 +102,10 @@ __global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y
 __global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int batch_size);
 
 // Function prototypes
-void cayley_transform_gpu(float* d_A_skew, float* d_A_orthogonal, int state_dim, cublasHandle_t cublas_handle);
+void cayley_transform_gpu(float* d_A_skew, float* d_A_orthogonal, int state_dim, 
+                         cusolverDnHandle_t cusolver_handle, 
+                         float* d_workspace_S, float* d_workspace_I_plus_S, float* d_workspace_I_minus_S,
+                         int* d_workspace_ipiv, float* d_workspace_info);
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
 void free_ssm(SSM* ssm);
 void reset_state_ssm(SSM* ssm);

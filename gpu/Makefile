@@ -4,7 +4,7 @@ LDFLAGS = -lm -flto
 
 ARCH ?= sm_87
 CUDAFLAGS = --cuda-gpu-arch=$(ARCH) -x cuda -Wno-unknown-cuda-version
-CUDALIBS = -L/usr/local/cuda/lib64 -lcudart -lcublas
+CUDALIBS = -L/usr/local/cuda/lib64 -lcudart -lcublas -lcusolver
 
 train.out: ssm.o data.o train.o
 	$(CC) ssm.o data.o train.o $(CUDALIBS) $(LDFLAGS) -o $@
