@@ -11,7 +11,54 @@ __global__ void apply_givens_rotation_kernel_ssm(float* matrix, int n, int i, in
     }
 }
 
-// CUDA kernel for building orthogonal matrix from rotation angles
+// CUDA kernel for computing rotation gradients (single angle at a time)
+__global__ void compute_single_rotation_gradient_kernel_ssm(
+    float* rotation_grad, float* A_grad, float* A_temp, float* rotation_angles, 
+    int state_dim, int angle_idx, int rot_i, int rot_j) {
+    
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= state_dim) return;
+    
+    float theta = rotation_angles[angle_idx];
+    float cos_theta = cosf(theta);
+    float sin_theta = sinf(theta);
+    
+    // Compute gradient contribution for this angle
+    float grad_i_k = A_grad[rot_i * state_dim + k];
+    float grad_j_k = A_grad[rot_j * state_dim + k];
+    float a_i_k = A_temp[rot_i * state_dim + k];
+    float a_j_k = A_temp[rot_j * state_dim + k];
+    
+    // ∂/∂θ (cos(θ) * a_ik - sin(θ) * a_jk) = -sin(θ) * a_ik - cos(θ) * a_jk
+    // ∂/∂θ (sin(θ) * a_ik + cos(θ) * a_jk) = cos(θ) * a_ik - sin(θ) * a_jk
+    float grad_theta_contrib = grad_i_k * (-sin_theta * a_i_k - cos_theta * a_j_k) +
+                               grad_j_k * (cos_theta * a_i_k - sin_theta * a_j_k);
+    
+    // Use atomic add to accumulate gradient
+    atomicAdd(&rotation_grad[angle_idx], grad_theta_contrib);
+}
+
+// CUDA kernel for applying transpose Givens rotation to gradients
+__global__ void apply_transpose_givens_to_grads_kernel_ssm(
+    float* A_grad, int state_dim, int rot_i, int rot_j, float cos_theta, float sin_theta) {
+    
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= state_dim) return;
+    
+    float grad_i_k = A_grad[rot_i * state_dim + k];
+    float grad_j_k = A_grad[rot_j * state_dim + k];
+    
+    A_grad[rot_i * state_dim + k] = cos_theta * grad_i_k + sin_theta * grad_j_k;
+    A_grad[rot_j * state_dim + k] = -sin_theta * grad_i_k + cos_theta * grad_j_k;
+}
+
+// CUDA kernel for copying matrix
+__global__ void copy_matrix_kernel_ssm(float* dest, float* src, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        dest[idx] = src[idx];
+    }
+}
 __global__ void build_orthogonal_kernel_ssm(float* A_orthogonal, float* rotation_angles, int state_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_size = state_dim * state_dim;
@@ -143,6 +190,10 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&ssm->d_state_error, seq_len * batch_size * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_state_outputs, seq_len * batch_size * state_dim * sizeof(float)));
     
+    // Allocate temporary GPU buffers for gradient computation (to avoid malloc/free in backward pass)
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_temp, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_orthogonal_grad, state_dim * state_dim * sizeof(float)));
+    
     // Copy initialized matrices to device
     CHECK_CUDA(cudaMemcpy(ssm->d_A, A, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice)); // Keep for compatibility
     CHECK_CUDA(cudaMemcpy(ssm->d_rotation_angles, rotation_angles, num_angles * sizeof(float), cudaMemcpyHostToDevice));
@@ -185,6 +236,7 @@ void free_ssm(SSM* ssm) {
     cudaFree(ssm->d_C_m); cudaFree(ssm->d_C_v); cudaFree(ssm->d_D_m); cudaFree(ssm->d_D_v);
     cudaFree(ssm->d_states); cudaFree(ssm->d_predictions); cudaFree(ssm->d_error); 
     cudaFree(ssm->d_state_error); cudaFree(ssm->d_state_outputs);
+    cudaFree(ssm->d_A_temp); cudaFree(ssm->d_A_orthogonal_grad);  // Free temporary buffers
     
     // Destroy cuBLAS handle
     cublasDestroy(ssm->cublas_handle);
@@ -314,96 +366,50 @@ void compute_rotation_gradients_gpu(SSM* ssm, float* d_A_orthogonal_grad) {
     int n = ssm->state_dim;
     int num_angles = n * (n - 1) / 2;
     
-    // For GPU version, we'll use a simplified approach:
-    // Copy to host, compute gradients on CPU, then copy back
-    // This ensures correctness while avoiding complex GPU kernel development
+    // Use pre-allocated GPU buffers instead of malloc
+    // Copy current orthogonal matrix to temporary buffer
+    int total_size = n * n;
+    dim3 block(256);
+    dim3 grid((total_size + block.x - 1) / block.x);
     
-    float* h_A_grad = (float*)malloc(n * n * sizeof(float));
-    float* h_rotation_angles = (float*)malloc(num_angles * sizeof(float));
-    float* h_rotation_grad = (float*)malloc(num_angles * sizeof(float));
-    
-    // Copy from device to host
-    CHECK_CUDA(cudaMemcpy(h_A_grad, d_A_orthogonal_grad, n * n * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(h_rotation_angles, ssm->d_rotation_angles, num_angles * sizeof(float), cudaMemcpyDeviceToHost));
+    copy_matrix_kernel_ssm<<<grid, block>>>(ssm->d_A_temp, ssm->d_A_orthogonal, total_size);
+    CHECK_CUDA(cudaDeviceSynchronize());
     
     // Initialize rotation angle gradients to zero
-    memset(h_rotation_grad, 0, num_angles * sizeof(float));
-    
-    // Create a copy of the current orthogonal matrix on host
-    float* A_temp = (float*)malloc(n * n * sizeof(float));
-    
-    // Rebuild orthogonal matrix on host for gradient computation
-    memset(A_temp, 0, n * n * sizeof(float));
-    for (int i = 0; i < n; i++) {
-        A_temp[i * n + i] = 1.0f;
-    }
-    
-    int angle_idx = 0;
-    for (int i = 1; i < n; i++) {
-        for (int j = 0; j < i; j++) {
-            float theta = h_rotation_angles[angle_idx++];
-            float cos_theta = cosf(theta);
-            float sin_theta = sinf(theta);
-            
-            // Apply Givens rotation to A_temp
-            for (int k = 0; k < n; k++) {
-                float a_ik = A_temp[i * n + k];
-                float a_jk = A_temp[j * n + k];
-                A_temp[i * n + k] = cos_theta * a_ik - sin_theta * a_jk;
-                A_temp[j * n + k] = sin_theta * a_ik + cos_theta * a_jk;
-            }
-        }
-    }
+    CHECK_CUDA(cudaMemset(ssm->d_rotation_angles_grad, 0, num_angles * sizeof(float)));
     
     // Apply chain rule through each Givens rotation in reverse order
-    angle_idx = num_angles - 1;
+    int angle_idx = num_angles - 1;
     for (int i = n - 1; i >= 1; i--) {
         for (int j = i - 1; j >= 0; j--) {
-            float theta = h_rotation_angles[angle_idx];
+            // Compute gradient for this rotation angle using GPU kernel
+            dim3 grad_block(256);
+            dim3 grad_grid((n + grad_block.x - 1) / grad_block.x);
+            
+            compute_single_rotation_gradient_kernel_ssm<<<grad_grid, grad_block>>>(
+                ssm->d_rotation_angles_grad, d_A_orthogonal_grad, ssm->d_A_temp,
+                ssm->d_rotation_angles, n, angle_idx, i, j);
+            CHECK_CUDA(cudaDeviceSynchronize());
+            
+            // Get rotation angle for transpose operations (small host-device copy is acceptable)
+            float theta;
+            CHECK_CUDA(cudaMemcpy(&theta, &ssm->d_rotation_angles[angle_idx], sizeof(float), cudaMemcpyDeviceToHost));
             float cos_theta = cosf(theta);
             float sin_theta = sinf(theta);
             
-            // Compute derivative of loss w.r.t. this rotation angle
-            float grad_theta = 0.0f;
-            for (int k = 0; k < n; k++) {
-                float grad_i_k = h_A_grad[i * n + k];
-                float grad_j_k = h_A_grad[j * n + k];
-                float a_i_k = A_temp[i * n + k];
-                float a_j_k = A_temp[j * n + k];
-                
-                grad_theta += grad_i_k * (-sin_theta * a_i_k - cos_theta * a_j_k);
-                grad_theta += grad_j_k * (cos_theta * a_i_k - sin_theta * a_j_k);
-            }
+            // Apply transpose Givens rotation to gradients
+            apply_transpose_givens_to_grads_kernel_ssm<<<grad_grid, grad_block>>>(
+                d_A_orthogonal_grad, n, i, j, cos_theta, sin_theta);
+            CHECK_CUDA(cudaDeviceSynchronize());
             
-            h_rotation_grad[angle_idx] = grad_theta;
-            
-            // Update gradients by applying the transpose of this Givens rotation
-            for (int k = 0; k < n; k++) {
-                float grad_i_k = h_A_grad[i * n + k];
-                float grad_j_k = h_A_grad[j * n + k];
-                h_A_grad[i * n + k] = cos_theta * grad_i_k + sin_theta * grad_j_k;
-                h_A_grad[j * n + k] = -sin_theta * grad_i_k + cos_theta * grad_j_k;
-            }
-            
-            // Also apply transpose to the accumulated matrix for next iteration
-            for (int k = 0; k < n; k++) {
-                float a_ik = A_temp[i * n + k];
-                float a_jk = A_temp[j * n + k];
-                A_temp[i * n + k] = cos_theta * a_ik - sin_theta * a_jk;
-                A_temp[j * n + k] = sin_theta * a_ik + cos_theta * a_jk;
-            }
+            // Apply transpose Givens rotation to temporary matrix
+            apply_givens_rotation_kernel_ssm<<<grad_grid, grad_block>>>(
+                ssm->d_A_temp, n, i, j, cos_theta, sin_theta);
+            CHECK_CUDA(cudaDeviceSynchronize());
             
             angle_idx--;
         }
     }
-    
-    // Copy gradients back to device
-    CHECK_CUDA(cudaMemcpy(ssm->d_rotation_angles_grad, h_rotation_grad, num_angles * sizeof(float), cudaMemcpyHostToDevice));
-    
-    free(h_A_grad);
-    free(h_rotation_angles);
-    free(h_rotation_grad);
-    free(A_temp);
 }
 // Backward pass
 void backward_pass_ssm(SSM* ssm, float* d_X) {
@@ -414,9 +420,8 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
     // Clear state errors
     CHECK_CUDA(cudaMemset(ssm->d_state_error, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float)));
     
-    // Allocate temporary gradient for A_orthogonal
-    float* d_A_orthogonal_grad;
-    CHECK_CUDA(cudaMalloc(&d_A_orthogonal_grad, ssm->state_dim * ssm->state_dim * sizeof(float)));
+    // Use pre-allocated gradient buffer instead of malloc
+    float* d_A_orthogonal_grad = ssm->d_A_orthogonal_grad;
     CHECK_CUDA(cudaMemset(d_A_orthogonal_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float)));
     
     for (int t = ssm->seq_len - 1; t >= 0; t--) {
@@ -489,8 +494,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
     
     // Compute gradients w.r.t. rotation angles using chain rule
     compute_rotation_gradients_gpu(ssm, d_A_orthogonal_grad);
-    
-    cudaFree(d_A_orthogonal_grad);
+}
 }
 
 // CUDA kernel for AdamW update

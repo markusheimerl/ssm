@@ -42,6 +42,9 @@ typedef struct {
     float* state_error;    // seq_len x batch_size x state_dim
     float* state_outputs;  // seq_len x batch_size x state_dim
     
+    // Temporary buffers for gradient computation (to avoid malloc/free in backward pass)
+    float* A_temp;          // state_dim x state_dim temporary matrix for gradient computation
+    
     // Dimensions
     int input_dim;
     int state_dim;

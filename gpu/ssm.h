@@ -67,6 +67,10 @@ typedef struct {
     float* d_state_error;    // seq_len x batch_size x state_dim
     float* d_state_outputs;  // seq_len x batch_size x state_dim
     
+    // Temporary GPU buffers for gradient computation (to avoid malloc/free in backward pass)
+    float* d_A_temp;          // state_dim x state_dim temporary matrix for gradient computation
+    float* d_A_orthogonal_grad; // state_dim x state_dim gradient buffer
+    
     // cuBLAS handle
     cublasHandle_t cublas_handle;
     

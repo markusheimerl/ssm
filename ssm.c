@@ -40,8 +40,8 @@ void compute_rotation_gradients(SSM* ssm, float* A_orthogonal_grad) {
     // Initialize rotation angle gradients to zero
     memset(ssm->rotation_angles_grad, 0, num_angles * sizeof(float));
     
-    // Create a copy of the current orthogonal matrix
-    float* A_temp = (float*)malloc(n * n * sizeof(float));
+    // Use pre-allocated temporary buffer instead of malloc
+    float* A_temp = ssm->A_temp;
     memcpy(A_temp, ssm->A_orthogonal, n * n * sizeof(float));
     
     // Apply chain rule through each Givens rotation in reverse order
@@ -84,8 +84,6 @@ void compute_rotation_gradients(SSM* ssm, float* A_orthogonal_grad) {
             angle_idx--;
         }
     }
-    
-    free(A_temp);
 }
 
 // Initialize the state space model
@@ -141,6 +139,9 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->state_error = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     ssm->state_outputs = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     
+    // Allocate temporary buffers for gradient computation (to avoid malloc/free in backward pass)
+    ssm->A_temp = (float*)malloc(state_dim * state_dim * sizeof(float));
+    
     // Initialize B, C, D matrices
     float scale_B = 0.5f / sqrtf(input_dim);
     float scale_C = 0.5f / sqrtf(state_dim);
@@ -180,6 +181,7 @@ void free_ssm(SSM* ssm) {
     free(ssm->C_m); free(ssm->C_v); free(ssm->D_m); free(ssm->D_v);
     free(ssm->states); free(ssm->predictions); free(ssm->error); free(ssm->state_error);
     free(ssm->state_outputs);
+    free(ssm->A_temp);  // Free temporary buffer
     free(ssm);
 }
 
