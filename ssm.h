@@ -7,21 +7,25 @@
 #include <math.h>
 #include <cblas.h>
 
+// LAPACK function declaration
+extern void sgesv_(int* n, int* nrhs, float* a, int* lda, int* ipiv, float* b, int* ldb, int* info);
+
 typedef struct {
     // State space matrices
-    float* A;           // state_dim x state_dim (state transition)
+    float* A_skew;      // n(n-1)/2 skew-symmetric parameters for A
+    float* A_orthogonal; // state_dim x state_dim orthogonal A computed via Cayley transform
     float* B;           // state_dim x input_dim (input to state)
     float* C;           // output_dim x state_dim (state to output)
     float* D;           // output_dim x input_dim (input to output)
     
     // Gradients
-    float* A_grad;      // state_dim x state_dim
+    float* A_skew_grad; // n(n-1)/2 gradients w.r.t. skew-symmetric parameters
     float* B_grad;      // state_dim x input_dim
     float* C_grad;      // output_dim x state_dim
     float* D_grad;      // output_dim x input_dim
     
-    // Adam parameters for A, B, C, D
-    float* A_m; float* A_v;
+    // Adam parameters for A_skew, B, C, D
+    float* A_skew_m; float* A_skew_v;
     float* B_m; float* B_v;
     float* C_m; float* C_v;
     float* D_m; float* D_v;
@@ -46,6 +50,7 @@ typedef struct {
 } SSM;
 
 // Function prototypes
+void cayley_transform(float* A_skew, float* A_orthogonal, int state_dim);
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
 void free_ssm(SSM* ssm);
 void reset_state_ssm(SSM* ssm);
