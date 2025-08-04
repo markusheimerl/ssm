@@ -34,19 +34,20 @@
 
 typedef struct {
     // Device pointers for state space matrices
-    float* d_A;           // state_dim x state_dim (state transition)
+    float* d_A_skew;      // state_dim*(state_dim-1)/2 (skew-symmetric parameters)
+    float* d_A_orthogonal; // state_dim x state_dim (computed from A_skew)
     float* d_B;           // state_dim x input_dim (input to state)
     float* d_C;           // output_dim x state_dim (state to output)
     float* d_D;           // output_dim x input_dim (input to output)
     
     // Device pointers for gradients
-    float* d_A_grad;      // state_dim x state_dim
+    float* d_A_skew_grad; // state_dim*(state_dim-1)/2
     float* d_B_grad;      // state_dim x input_dim
     float* d_C_grad;      // output_dim x state_dim
     float* d_D_grad;      // output_dim x input_dim
     
     // Device pointers for Adam parameters
-    float* d_A_m; float* d_A_v;
+    float* d_A_skew_m; float* d_A_skew_v;
     float* d_B_m; float* d_B_v;
     float* d_C_m; float* d_C_v;
     float* d_D_m; float* d_D_v;
@@ -74,10 +75,18 @@ typedef struct {
 } SSM;
 
 // CUDA kernel prototypes
+__global__ void create_skew_symmetric_kernel(float* A_skew_full, const float* A_skew_params, int n);
+__global__ void matrix_exponential_pade_kernel(float* exp_A, const float* A_skew_full, int n);
+__global__ void matrix_exponential_gradient_kernel(float* grad_A_skew, const float* grad_exp_A, int n, int skew_params);
 __global__ void swish_forward_kernel_ssm(float* output, float* input, int size);
 __global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size);
 __global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y, int size);
 __global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int batch_size);
+
+// Function prototypes
+void create_skew_symmetric_gpu(float* d_A_skew_full, const float* d_A_skew_params, int n);
+void matrix_exponential_pade_gpu(float* d_exp_A, const float* d_A_skew_full, int n);
+void matrix_exponential_gradient_gpu(float* d_grad_A_skew, const float* d_grad_exp_A, int n);
 
 // Function prototypes
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);

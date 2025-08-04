@@ -1,5 +1,97 @@
 #include "ssm.h"
 
+// CUDA kernel for creating skew-symmetric matrix from upper triangular parameters
+__global__ void create_skew_symmetric_kernel(float* A_skew_full, const float* A_skew_params, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_elements = n * n;
+    
+    if (idx < total_elements) {
+        int i = idx / n;
+        int j = idx % n;
+        
+        if (i == j) {
+            A_skew_full[idx] = 0.0f;  // Diagonal elements are zero
+        } else if (i < j) {
+            // Upper triangle: find parameter index
+            int param_idx = i * n - (i * (i + 1)) / 2 + (j - i - 1);
+            A_skew_full[idx] = A_skew_params[param_idx];
+        } else {
+            // Lower triangle: negative of corresponding upper triangle
+            int param_idx = j * n - (j * (j + 1)) / 2 + (i - j - 1);
+            A_skew_full[idx] = -A_skew_params[param_idx];
+        }
+    }
+}
+
+// CUDA kernel for simplified matrix exponential (Padé approximation)
+__global__ void matrix_exponential_pade_kernel(float* exp_A, const float* A_skew_full, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_elements = n * n;
+    
+    if (idx < total_elements) {
+        int i = idx / n;
+        int j = idx % n;
+        
+        // For small matrices, use first-order approximation: exp(A) ≈ I + A
+        if (i == j) {
+            exp_A[idx] = 1.0f + A_skew_full[idx];  // I + A
+        } else {
+            exp_A[idx] = A_skew_full[idx];
+        }
+    }
+}
+
+// CUDA kernel for matrix exponential gradient computation
+__global__ void matrix_exponential_gradient_kernel(float* grad_A_skew, const float* grad_exp_A, int n, int skew_params) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx < skew_params) {
+        // Convert linear index to upper triangular (i,j) coordinates
+        int param_idx = 0;
+        int i = 0, j = 1;
+        
+        while (param_idx < idx) {
+            j++;
+            if (j >= n) {
+                i++;
+                j = i + 1;
+            }
+            param_idx++;
+        }
+        
+        // Gradient w.r.t. A_skew[param] = grad_exp_A[i,j] - grad_exp_A[j,i]
+        grad_A_skew[idx] = grad_exp_A[i * n + j] - grad_exp_A[j * n + i];
+    }
+}
+
+// GPU utility functions
+void create_skew_symmetric_gpu(float* d_A_skew_full, const float* d_A_skew_params, int n) {
+    int total_elements = n * n;
+    int block_size = 256;
+    int grid_size = (total_elements + block_size - 1) / block_size;
+    
+    create_skew_symmetric_kernel<<<grid_size, block_size>>>(d_A_skew_full, d_A_skew_params, n);
+    CHECK_CUDA(cudaGetLastError());
+}
+
+void matrix_exponential_pade_gpu(float* d_exp_A, const float* d_A_skew_full, int n) {
+    int total_elements = n * n;
+    int block_size = 256;
+    int grid_size = (total_elements + block_size - 1) / block_size;
+    
+    matrix_exponential_pade_kernel<<<grid_size, block_size>>>(d_exp_A, d_A_skew_full, n);
+    CHECK_CUDA(cudaGetLastError());
+}
+
+void matrix_exponential_gradient_gpu(float* d_grad_A_skew, const float* d_grad_exp_A, int n) {
+    int skew_params = n * (n - 1) / 2;
+    int block_size = 256;
+    int grid_size = (skew_params + block_size - 1) / block_size;
+    
+    matrix_exponential_gradient_kernel<<<grid_size, block_size>>>(d_grad_A_skew, d_grad_exp_A, n, skew_params);
+    CHECK_CUDA(cudaGetLastError());
+}
+
 // Initialize the state space model
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size) {
     SSM* ssm = (SSM*)malloc(sizeof(SSM));
@@ -22,8 +114,11 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUBLAS(cublasCreate(&ssm->cublas_handle));
     CHECK_CUBLAS(cublasSetMathMode(ssm->cublas_handle, CUBLAS_TENSOR_OP_MATH));
     
+    // Calculate number of skew-symmetric parameters
+    int skew_params = state_dim * (state_dim - 1) / 2;
+    
     // Allocate host memory for initialization
-    float* A = (float*)calloc(state_dim * state_dim, sizeof(float));
+    float* A_skew = (float*)malloc(skew_params * sizeof(float));
     float* B = (float*)malloc(state_dim * input_dim * sizeof(float));
     float* C = (float*)malloc(output_dim * state_dim * sizeof(float));
     float* D = (float*)malloc(output_dim * input_dim * sizeof(float));
@@ -45,54 +140,28 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
         D[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_D;
     }
     
-    // HiPPO-Leg inspired initialization for A matrix
-    // Creates a lower triangular structure optimized for memory compression
-    // and long-range dependency modeling
-    
-    // Create base lower triangular structure
-    for (int i = 0; i < state_dim; i++) {
-        for (int j = 0; j <= i; j++) {
-            if (i == j) {
-                // Diagonal: negative values that increase in magnitude with index
-                // This creates a structured forgetting pattern
-                A[i * state_dim + j] = -0.01f - (i * 0.001f / state_dim);
-            } else {
-                // Off-diagonal: small positive values that decay with distance
-                // This enables information flow between nearby state components
-                float distance = i - j;
-                A[i * state_dim + j] = 0.001f / (1.0f + distance * 0.1f);
-            }
-        }
-    }
-    
-    // Apply Legendre polynomial scaling for optimal memory compression
-    // This gives higher-order basis functions more importance
-    float norm_factor = sqrtf(2.0f * state_dim + 1.0f);
-    for (int i = 0; i < state_dim; i++) {
-        float importance = sqrtf(2.0f * i + 1.0f);
-        float normalized_importance = 1.0f + 0.1f * importance / norm_factor;
-        
-        // Scale entire row by importance factor
-        for (int j = 0; j <= i; j++) {
-            A[i * state_dim + j] *= normalized_importance;
-        }
+    // Initialize A_skew parameters with small random values
+    float scale_A_skew = 0.1f / sqrtf(state_dim);
+    for (int i = 0; i < skew_params; i++) {
+        A_skew[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_A_skew;
     }
     
     // Allocate device memory for matrices
-    CHECK_CUDA(cudaMalloc(&ssm->d_A, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_skew, skew_params * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_orthogonal, state_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_B, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_C, output_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_D, output_dim * input_dim * sizeof(float)));
     
     // Allocate device memory for gradients
-    CHECK_CUDA(cudaMalloc(&ssm->d_A_grad, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_skew_grad, skew_params * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_B_grad, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_C_grad, output_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_D_grad, output_dim * input_dim * sizeof(float)));
     
     // Allocate device memory for Adam parameters
-    CHECK_CUDA(cudaMalloc(&ssm->d_A_m, state_dim * state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_A_v, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_skew_m, skew_params * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_skew_v, skew_params * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_B_m, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_B_v, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_C_m, output_dim * state_dim * sizeof(float)));
@@ -108,14 +177,14 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&ssm->d_state_outputs, seq_len * batch_size * state_dim * sizeof(float)));
     
     // Copy initialized matrices to device
-    CHECK_CUDA(cudaMemcpy(ssm->d_A, A, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_A_skew, A_skew, skew_params * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_B, B, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_C, C, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_D, D, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     // Initialize Adam parameters to zero
-    CHECK_CUDA(cudaMemset(ssm->d_A_m, 0, state_dim * state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(ssm->d_A_v, 0, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_A_skew_m, 0, skew_params * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_A_skew_v, 0, skew_params * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_B_m, 0, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_B_v, 0, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_C_m, 0, output_dim * state_dim * sizeof(float)));
@@ -123,8 +192,15 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMemset(ssm->d_D_m, 0, output_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_D_v, 0, output_dim * input_dim * sizeof(float)));
     
+    // Compute initial A_orthogonal from A_skew on GPU
+    float* d_A_skew_full;
+    CHECK_CUDA(cudaMalloc(&d_A_skew_full, state_dim * state_dim * sizeof(float)));
+    create_skew_symmetric_gpu(d_A_skew_full, ssm->d_A_skew, state_dim);
+    matrix_exponential_pade_gpu(ssm->d_A_orthogonal, d_A_skew_full, state_dim);
+    CHECK_CUDA(cudaFree(d_A_skew_full));
+    
     // Free host memory
-    free(A);
+    free(A_skew);
     free(B);
     free(C);
     free(D);
@@ -135,9 +211,9 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
 // Free memory
 void free_ssm(SSM* ssm) {
     // Free device memory
-    cudaFree(ssm->d_A); cudaFree(ssm->d_B); cudaFree(ssm->d_C); cudaFree(ssm->d_D);
-    cudaFree(ssm->d_A_grad); cudaFree(ssm->d_B_grad); cudaFree(ssm->d_C_grad); cudaFree(ssm->d_D_grad);
-    cudaFree(ssm->d_A_m); cudaFree(ssm->d_A_v); cudaFree(ssm->d_B_m); cudaFree(ssm->d_B_v);
+    cudaFree(ssm->d_A_skew); cudaFree(ssm->d_A_orthogonal); cudaFree(ssm->d_B); cudaFree(ssm->d_C); cudaFree(ssm->d_D);
+    cudaFree(ssm->d_A_skew_grad); cudaFree(ssm->d_B_grad); cudaFree(ssm->d_C_grad); cudaFree(ssm->d_D_grad);
+    cudaFree(ssm->d_A_skew_m); cudaFree(ssm->d_A_skew_v); cudaFree(ssm->d_B_m); cudaFree(ssm->d_B_v);
     cudaFree(ssm->d_C_m); cudaFree(ssm->d_C_v); cudaFree(ssm->d_D_m); cudaFree(ssm->d_D_v);
     cudaFree(ssm->d_states); cudaFree(ssm->d_predictions); cudaFree(ssm->d_error); 
     cudaFree(ssm->d_state_error); cudaFree(ssm->d_state_outputs);
