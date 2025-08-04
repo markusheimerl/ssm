@@ -42,6 +42,9 @@ __global__ void matrix_exponential_pade_kernel(float* exp_A, const float* A_skew
 }
 
 // CUDA kernel for matrix exponential gradient computation
+// NOTE: This is a simplified gradient computation. For production use,
+// implement proper chain rule gradient using cuSOLVER for matrix operations.
+// The CPU version now has the proper implementation that should be ported.
 __global__ void matrix_exponential_gradient_kernel(float* grad_A_skew, const float* grad_exp_A, int n, int skew_params) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -59,7 +62,8 @@ __global__ void matrix_exponential_gradient_kernel(float* grad_A_skew, const flo
             param_idx++;
         }
         
-        // Gradient w.r.t. A_skew[param] = grad_exp_A[i,j] - grad_exp_A[j,i]
+        // Simplified gradient: This should be replaced with proper chain rule computation
+        // when cuSOLVER integration is available for matrix operations
         grad_A_skew[idx] = grad_exp_A[i * n + j] - grad_exp_A[j * n + i];
     }
 }
@@ -90,6 +94,15 @@ void matrix_exponential_gradient_gpu(float* d_grad_A_skew, const float* d_grad_e
     
     matrix_exponential_gradient_kernel<<<grid_size, block_size>>>(d_grad_A_skew, d_grad_exp_A, n, skew_params);
     CHECK_CUDA(cudaGetLastError());
+}
+
+// Compute orthogonal matrix from skew-symmetric parameters
+void compute_orthogonal_matrix_gpu(SSM* ssm) {
+    // Create full skew-symmetric matrix from parameters
+    create_skew_symmetric_gpu(ssm->d_A_orthogonal, ssm->d_A_skew, ssm->state_dim);
+    
+    // Compute matrix exponential (orthogonal matrix)
+    matrix_exponential_pade_gpu(ssm->d_A_orthogonal, ssm->d_A_orthogonal, ssm->state_dim);
 }
 
 // Initialize the state space model
@@ -538,8 +551,8 @@ void save_ssm(SSM* ssm, const char* filename) {
     float* D_m = (float*)malloc(ssm->output_dim * ssm->input_dim * sizeof(float));
     float* D_v = (float*)malloc(ssm->output_dim * ssm->input_dim * sizeof(float));
     
-    CHECK_CUDA(cudaMemcpy(A_m, ssm->d_A_m, ssm->state_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(A_v, ssm->d_A_v, ssm->state_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(A_skew_m, ssm->d_A_skew_m, skew_params * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(A_skew_v, ssm->d_A_skew_v, skew_params * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(B_m, ssm->d_B_m, ssm->state_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(B_v, ssm->d_B_v, ssm->state_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(C_m, ssm->d_C_m, ssm->output_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
@@ -547,8 +560,8 @@ void save_ssm(SSM* ssm, const char* filename) {
     CHECK_CUDA(cudaMemcpy(D_m, ssm->d_D_m, ssm->output_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(D_v, ssm->d_D_v, ssm->output_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     
-    fwrite(A_m, sizeof(float), ssm->state_dim * ssm->state_dim, file);
-    fwrite(A_v, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    fwrite(A_skew_m, sizeof(float), skew_params, file);
+    fwrite(A_skew_v, sizeof(float), skew_params, file);
     fwrite(B_m, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(B_v, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(C_m, sizeof(float), ssm->output_dim * ssm->state_dim, file);
@@ -557,8 +570,8 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(D_v, sizeof(float), ssm->output_dim * ssm->input_dim, file);
     
     // Free temporary host memory
-    free(A); free(B); free(C); free(D);
-    free(A_m); free(A_v); free(B_m); free(B_v);
+    free(A_skew); free(B); free(C); free(D);
+    free(A_skew_m); free(A_skew_v); free(B_m); free(B_v);
     free(C_m); free(C_v); free(D_m); free(D_v);
     
     fclose(file);
@@ -587,13 +600,14 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
     
     // Allocate temporary host memory
-    float* A = (float*)malloc(state_dim * state_dim * sizeof(float));
+    int skew_params = state_dim * (state_dim - 1) / 2;
+    float* A_skew = (float*)malloc(skew_params * sizeof(float));
     float* B = (float*)malloc(state_dim * input_dim * sizeof(float));
     float* C = (float*)malloc(output_dim * state_dim * sizeof(float));
     float* D = (float*)malloc(output_dim * input_dim * sizeof(float));
     
     // Load matrices
-    fread(A, sizeof(float), state_dim * state_dim, file);
+    fread(A_skew, sizeof(float), skew_params, file);
     fread(B, sizeof(float), state_dim * input_dim, file);
     fread(C, sizeof(float), output_dim * state_dim, file);
     fread(D, sizeof(float), output_dim * input_dim, file);
@@ -601,14 +615,14 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(&ssm->t, sizeof(int), 1, file);
     
     // Copy matrices to device
-    CHECK_CUDA(cudaMemcpy(ssm->d_A, A, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_A_skew, A_skew, skew_params * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_B, B, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_C, C, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_D, D, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     // Load Adam state
-    float* A_m = (float*)malloc(state_dim * state_dim * sizeof(float));
-    float* A_v = (float*)malloc(state_dim * state_dim * sizeof(float));
+    float* A_skew_m = (float*)malloc(skew_params * sizeof(float));
+    float* A_skew_v = (float*)malloc(skew_params * sizeof(float));
     float* B_m = (float*)malloc(state_dim * input_dim * sizeof(float));
     float* B_v = (float*)malloc(state_dim * input_dim * sizeof(float));
     float* C_m = (float*)malloc(output_dim * state_dim * sizeof(float));
@@ -616,8 +630,8 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     float* D_m = (float*)malloc(output_dim * input_dim * sizeof(float));
     float* D_v = (float*)malloc(output_dim * input_dim * sizeof(float));
     
-    fread(A_m, sizeof(float), state_dim * state_dim, file);
-    fread(A_v, sizeof(float), state_dim * state_dim, file);
+    fread(A_skew_m, sizeof(float), skew_params, file);
+    fread(A_skew_v, sizeof(float), skew_params, file);
     fread(B_m, sizeof(float), state_dim * input_dim, file);
     fread(B_v, sizeof(float), state_dim * input_dim, file);
     fread(C_m, sizeof(float), output_dim * state_dim, file);
@@ -626,8 +640,8 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(D_v, sizeof(float), output_dim * input_dim, file);
     
     // Copy Adam state to device
-    CHECK_CUDA(cudaMemcpy(ssm->d_A_m, A_m, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_A_v, A_v, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_A_skew_m, A_skew_m, skew_params * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_A_skew_v, A_skew_v, skew_params * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_B_m, B_m, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_B_v, B_v, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_C_m, C_m, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
@@ -636,9 +650,12 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     CHECK_CUDA(cudaMemcpy(ssm->d_D_v, D_v, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     // Free temporary host memory
-    free(A); free(B); free(C); free(D);
-    free(A_m); free(A_v); free(B_m); free(B_v);
+    free(A_skew); free(B); free(C); free(D);
+    free(A_skew_m); free(A_skew_v); free(B_m); free(B_v);
     free(C_m); free(C_v); free(D_m); free(D_v);
+    
+    // Recompute A_orthogonal from A_skew parameters
+    compute_orthogonal_matrix_gpu(ssm);
     
     fclose(file);
     printf("Model loaded from %s\n", filename);

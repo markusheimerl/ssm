@@ -1,5 +1,51 @@
 #include "ssm.h"
 
+// Custom BLAS implementation (self-contained, no external dependencies)
+void cblas_sgemm(CBLAS_LAYOUT layout, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB,
+                int m, int n, int k, float alpha, const float* A, int lda,
+                const float* B, int ldb, float beta, float* C, int ldc) {
+    // Simple implementation for small matrices typically used in SSM
+    // Supports row-major layout only for simplicity
+    if (layout != CblasRowMajor) {
+        printf("Error: Only row-major layout supported in custom BLAS\n");
+        exit(1);
+    }
+    
+    // Scale C by beta first
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            C[i * ldc + j] *= beta;
+        }
+    }
+    
+    // Compute C += alpha * A * B (with optional transposes)
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            float sum = 0.0f;
+            for (int l = 0; l < k; l++) {
+                float a_val, b_val;
+                
+                // Get A[i,l] with optional transpose
+                if (transA == CblasNoTrans) {
+                    a_val = A[i * lda + l];
+                } else {
+                    a_val = A[l * lda + i];
+                }
+                
+                // Get B[l,j] with optional transpose  
+                if (transB == CblasNoTrans) {
+                    b_val = B[l * ldb + j];
+                } else {
+                    b_val = B[j * ldb + l];
+                }
+                
+                sum += a_val * b_val;
+            }
+            C[i * ldc + j] += alpha * sum;
+        }
+    }
+}
+
 // Create full skew-symmetric matrix from upper triangular parameters
 void create_skew_symmetric(float* A_skew_full, const float* A_skew_params, int n) {
     // Initialize to zero
@@ -16,21 +62,71 @@ void create_skew_symmetric(float* A_skew_full, const float* A_skew_params, int n
     }
 }
 
-void sgetri_(int* n, float* a, int* lda, int* ipiv, float* work, int* lwork, int* info);
-
+// Custom matrix inversion using Gaussian elimination with partial pivoting
 int matrix_invert(float* inv, const float* A, int n, float* workspace) {
-    int* ipiv = (int*)workspace;
-    float* work = workspace + n;
-    int lwork = n;
-
-    // Copy A to inv
-    memcpy(inv, A, n * n * sizeof(float));
-
-    // Call LAPACK function
-    int info;
-    sgetri_(&n, inv, &n, ipiv, work, &lwork, &info);
+    // Create augmented matrix [A | I] in workspace
+    float* augmented = workspace;
     
-    return info;
+    // Initialize augmented matrix [A | I]
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            augmented[i * (2*n) + j] = A[i * n + j];           // A part
+            augmented[i * (2*n) + (j + n)] = (i == j) ? 1.0f : 0.0f; // I part
+        }
+    }
+    
+    // Forward elimination with partial pivoting
+    for (int k = 0; k < n; k++) {
+        // Find pivot
+        int pivot_row = k;
+        float max_val = fabsf(augmented[k * (2*n) + k]);
+        for (int i = k + 1; i < n; i++) {
+            float val = fabsf(augmented[i * (2*n) + k]);
+            if (val > max_val) {
+                max_val = val;
+                pivot_row = i;
+            }
+        }
+        
+        // Check for singularity
+        if (max_val < 1e-12f) {
+            return 1; // Singular matrix
+        }
+        
+        // Swap rows if needed
+        if (pivot_row != k) {
+            for (int j = 0; j < 2*n; j++) {
+                float temp = augmented[k * (2*n) + j];
+                augmented[k * (2*n) + j] = augmented[pivot_row * (2*n) + j];
+                augmented[pivot_row * (2*n) + j] = temp;
+            }
+        }
+        
+        // Scale pivot row
+        float pivot = augmented[k * (2*n) + k];
+        for (int j = 0; j < 2*n; j++) {
+            augmented[k * (2*n) + j] /= pivot;
+        }
+        
+        // Eliminate below and above pivot
+        for (int i = 0; i < n; i++) {
+            if (i != k) {
+                float factor = augmented[i * (2*n) + k];
+                for (int j = 0; j < 2*n; j++) {
+                    augmented[i * (2*n) + j] -= factor * augmented[k * (2*n) + j];
+                }
+            }
+        }
+    }
+    
+    // Extract inverse matrix from right half of augmented matrix
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            inv[i * n + j] = augmented[i * (2*n) + (j + n)];
+        }
+    }
+    
+    return 0; // Success
 }
 
 // Matrix exponential via Padé approximation with proper matrix inversion
@@ -44,7 +140,7 @@ void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n, floa
     // workspace[2n²..3n²-1]: numerator
     // workspace[3n²..4n²-1]: denominator
     // workspace[4n²..5n²-1]: denominator_inv
-    // workspace[5n²..5n²+2n²-1]: aug matrix for inversion
+    // workspace[5n²..7n²-1]: augmented matrix for inversion (2n x n)
     
     float* identity = workspace;
     float* A2 = workspace + n * n;
@@ -91,23 +187,141 @@ void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n, floa
     }
 }
 
-// Compute gradient through matrix exponential (simplified)
+// Compute gradient through matrix exponential using chain rule
 void matrix_exponential_gradient(float* grad_A_skew, const float* grad_exp_A, 
                                 const float* A_skew_full, int n) {
-    // Simplified gradient computation
-    // For small skew-symmetric matrices, use first-order approximation:
-    // d(exp(A))/dA ≈ I for small A
-    // We use A_skew_full for completeness but simplify the computation
-    (void)A_skew_full; // Mark as used to avoid warning
+    // For matrix exponential exp(A) = numerator * denominator^(-1) (Padé approximation),
+    // we need to compute d(exp(A))/dA using the chain rule.
+    // 
+    // Let Y = exp(A), N = numerator, D = denominator, then Y = N * D^(-1)
+    // dY/dA = (dN/dA) * D^(-1) + N * d(D^(-1))/dA
+    // where d(D^(-1))/dA = -D^(-1) * (dD/dA) * D^(-1)
     
-    int param_idx = 0;
+    // Allocate workspace for intermediate calculations
+    float* workspace = (float*)calloc(6 * n * n, sizeof(float));
+    float* numerator = workspace;           // n x n
+    float* denominator = workspace + n*n;   // n x n  
+    float* denominator_inv = workspace + 2*n*n; // n x n
+    float* dN_dA = workspace + 3*n*n;       // n x n (derivative of numerator)
+    float* dD_dA = workspace + 4*n*n;       // n x n (derivative of denominator)
+    float* temp = workspace + 5*n*n;        // n x n (temporary)
+    
+    // Recompute numerator and denominator from A_skew_full
+    // Numerator = I + A/2 + A²/12
+    // Denominator = I - A/2 + A²/12
+    
+    // Compute A²
+    float* A_squared = temp;
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, n, n, n,
+                1.0f, A_skew_full, n, A_skew_full, n, 0.0f, A_squared, n);
+    
+    // Build numerator: I + A/2 + A²/12
+    memset(numerator, 0, n * n * sizeof(float));
     for (int i = 0; i < n; i++) {
-        for (int j = i + 1; j < n; j++) {
-            // Sum gradients for A[i,j] and A[j,i] positions
-            grad_A_skew[param_idx] = grad_exp_A[i * n + j] - grad_exp_A[j * n + i];
+        numerator[i * n + i] = 1.0f;  // Identity
+        for (int j = 0; j < n; j++) {
+            numerator[i * n + j] += 0.5f * A_skew_full[i * n + j];     // A/2
+            numerator[i * n + j] += (1.0f/12.0f) * A_squared[i * n + j]; // A²/12
+        }
+    }
+    
+    // Build denominator: I - A/2 + A²/12
+    memset(denominator, 0, n * n * sizeof(float));
+    for (int i = 0; i < n; i++) {
+        denominator[i * n + i] = 1.0f;  // Identity
+        for (int j = 0; j < n; j++) {
+            denominator[i * n + j] -= 0.5f * A_skew_full[i * n + j];     // -A/2
+            denominator[i * n + j] += (1.0f/12.0f) * A_squared[i * n + j]; // A²/12
+        }
+    }
+    
+    // Compute denominator inverse (reuse previous inversion code)
+    int inversion_result = matrix_invert(denominator_inv, denominator, n, temp);
+    
+    if (inversion_result != 0) {
+        // If inversion fails, fall back to simplified gradient
+        int param_idx = 0;
+        for (int i = 0; i < n; i++) {
+            for (int j = i + 1; j < n; j++) {
+                grad_A_skew[param_idx] = grad_exp_A[i * n + j] - grad_exp_A[j * n + i];
+                param_idx++;
+            }
+        }
+        free(workspace);
+        return;
+    }
+    
+    // Now compute gradients: dY/dA = (dN/dA) * D^(-1) + N * d(D^(-1))/dA
+    // where d(D^(-1))/dA = -D^(-1) * (dD/dA) * D^(-1)
+    
+    // For each element A[k,l], compute contributions to gradient
+    int param_idx = 0;
+    for (int k = 0; k < n; k++) {
+        for (int l = k + 1; l < n; l++) {
+            // A_skew[k,l] affects A[k,l] = +param and A[l,k] = -param
+            
+            float grad_sum = 0.0f;
+            
+            // Compute dN/dA[k,l] and dD/dA[k,l]
+            memset(dN_dA, 0, n * n * sizeof(float));
+            memset(dD_dA, 0, n * n * sizeof(float));
+            
+            // dN/dA[k,l]: derivative of (I + A/2 + A²/12) w.r.t A[k,l]
+            dN_dA[k * n + l] += 0.5f;  // from A/2 term
+            dN_dA[l * n + k] -= 0.5f;  // skew-symmetric: A[l,k] = -A[k,l]
+            
+            // From A²/12 term: d(A²)/dA[k,l] = A * E[k,l] + E[k,l] * A
+            // where E[k,l] is matrix with 1 at (k,l), -1 at (l,k), 0 elsewhere
+            for (int i = 0; i < n; i++) {
+                dN_dA[i * n + l] += (1.0f/12.0f) * A_skew_full[i * n + k];  // A * E[k,l]
+                dN_dA[k * n + i] += (1.0f/12.0f) * A_skew_full[l * n + i];  // E[k,l] * A
+                dN_dA[i * n + k] -= (1.0f/12.0f) * A_skew_full[i * n + l];  // A * E[l,k]
+                dN_dA[l * n + i] -= (1.0f/12.0f) * A_skew_full[k * n + i];  // E[l,k] * A
+            }
+            
+            // dD/dA[k,l]: derivative of (I - A/2 + A²/12) w.r.t A[k,l]
+            dD_dA[k * n + l] -= 0.5f;  // from -A/2 term
+            dD_dA[l * n + k] += 0.5f;  // skew-symmetric: A[l,k] = -A[k,l]
+            
+            // A²/12 term has same derivative as in numerator
+            for (int i = 0; i < n; i++) {
+                dD_dA[i * n + l] += (1.0f/12.0f) * A_skew_full[i * n + k];
+                dD_dA[k * n + i] += (1.0f/12.0f) * A_skew_full[l * n + i];
+                dD_dA[i * n + k] -= (1.0f/12.0f) * A_skew_full[i * n + l];
+                dD_dA[l * n + i] -= (1.0f/12.0f) * A_skew_full[k * n + i];
+            }
+            
+            // Compute gradient contributions:
+            // grad_sum += tr(grad_exp_A^T * ((dN/dA) * D^(-1) - N * D^(-1) * (dD/dA) * D^(-1)))
+            
+            // First term: grad_exp_A^T * (dN/dA) * D^(-1)
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, n, n, n,
+                        1.0f, dN_dA, n, denominator_inv, n, 0.0f, temp, n);
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < n; j++) {
+                    grad_sum += grad_exp_A[i * n + j] * temp[i * n + j];
+                }
+            }
+            
+            // Second term: -grad_exp_A^T * N * D^(-1) * (dD/dA) * D^(-1)
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, n, n, n,
+                        1.0f, dD_dA, n, denominator_inv, n, 0.0f, temp, n);
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, n, n, n,
+                        1.0f, denominator_inv, n, temp, n, 0.0f, dD_dA, n); // reuse dD_dA
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, n, n, n,
+                        1.0f, numerator, n, dD_dA, n, 0.0f, temp, n);
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < n; j++) {
+                    grad_sum -= grad_exp_A[i * n + j] * temp[i * n + j];
+                }
+            }
+            
+            grad_A_skew[param_idx] = grad_sum;
             param_idx++;
         }
     }
+    
+    free(workspace);
 }
 
 // Initialize the state space model

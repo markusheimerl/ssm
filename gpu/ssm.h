@@ -88,6 +88,7 @@ __global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, fl
 void create_skew_symmetric_gpu(float* d_A_skew_full, const float* d_A_skew_params, int n);
 void matrix_exponential_pade_gpu(float* d_exp_A, const float* d_A_skew_full, int n);
 void matrix_exponential_gradient_gpu(float* d_grad_A_skew, const float* d_grad_exp_A, int n);
+void compute_orthogonal_matrix_gpu(SSM* ssm);
 
 // Function prototypes
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
