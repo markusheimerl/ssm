@@ -34,19 +34,20 @@
 
 typedef struct {
     // Device pointers for state space matrices
-    float* d_A;           // state_dim x state_dim (state transition)
+    float* d_A_skew;       // n(n-1)/2 skew-symmetric parameters for A
+    float* d_A_orthogonal; // state_dim x state_dim orthogonal A computed via Cayley transform
     float* d_B;           // state_dim x input_dim (input to state)
     float* d_C;           // output_dim x state_dim (state to output)
     float* d_D;           // output_dim x input_dim (input to output)
     
     // Device pointers for gradients
-    float* d_A_grad;      // state_dim x state_dim
+    float* d_A_skew_grad;  // n(n-1)/2 gradients w.r.t. skew-symmetric parameters
     float* d_B_grad;      // state_dim x input_dim
     float* d_C_grad;      // output_dim x state_dim
     float* d_D_grad;      // output_dim x input_dim
     
     // Device pointers for Adam parameters
-    float* d_A_m; float* d_A_v;
+    float* d_A_skew_m; float* d_A_skew_v;
     float* d_B_m; float* d_B_v;
     float* d_C_m; float* d_C_v;
     float* d_D_m; float* d_D_v;
@@ -80,6 +81,7 @@ __global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y
 __global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int batch_size);
 
 // Function prototypes
+void cayley_transform_gpu(float* d_A_skew, float* d_A_orthogonal, int state_dim, cublasHandle_t cublas_handle);
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
 void free_ssm(SSM* ssm);
 void reset_state_ssm(SSM* ssm);
