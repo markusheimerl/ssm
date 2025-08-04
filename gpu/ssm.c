@@ -230,13 +230,16 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
     const float beta = 0.0f;
     const float beta_add = 1.0f;
     
+    // Build orthogonal A matrix from current rotation angles
+    build_orthogonal_from_angles(ssm);
+    
     // Get pointers to current timestep state
     float* d_h_prev = (timestep > 0) ? ssm->d_states + (timestep - 1) * ssm->batch_size * ssm->state_dim : NULL;
     float* d_h_t = ssm->d_states + timestep * ssm->batch_size * ssm->state_dim;
     float* d_o_t = ssm->d_state_outputs + timestep * ssm->batch_size * ssm->state_dim;
     float* d_y_t = ssm->d_predictions + timestep * ssm->batch_size * ssm->output_dim;
     
-    // H_t = X_t B^T + H_{t-1} A^T
+    // H_t = X_t B^T + H_{t-1} A_orthogonal^T
     // H_t = X_t B^T
     CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                             CUBLAS_OP_T, CUBLAS_OP_N,
@@ -245,12 +248,12 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                             d_X_t, ssm->input_dim,
                             &beta, d_h_t, ssm->state_dim));
     
-    // H_t += H_{t-1} A^T
+    // H_t += H_{t-1} A_orthogonal^T
     if (timestep > 0) {
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 ssm->state_dim, ssm->batch_size, ssm->state_dim,
-                                &alpha, ssm->d_A, ssm->state_dim,
+                                &alpha, ssm->d_A_orthogonal, ssm->state_dim,
                                 d_h_prev, ssm->state_dim,
                                 &beta_add, d_h_t, ssm->state_dim));
     }
@@ -299,12 +302,109 @@ float calculate_loss_ssm(SSM* ssm, float* d_y) {
 
 // Zero gradients
 void zero_gradients_ssm(SSM* ssm) {
-    CHECK_CUDA(cudaMemset(ssm->d_A_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float)));
+    int num_angles = ssm->state_dim * (ssm->state_dim - 1) / 2;
+    CHECK_CUDA(cudaMemset(ssm->d_rotation_angles_grad, 0, num_angles * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_B_grad, 0, ssm->state_dim * ssm->input_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_C_grad, 0, ssm->output_dim * ssm->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(float)));
 }
 
+// Compute gradients of rotation angles from gradients of orthogonal matrix (GPU version)
+void compute_rotation_gradients_gpu(SSM* ssm, float* d_A_orthogonal_grad) {
+    int n = ssm->state_dim;
+    int num_angles = n * (n - 1) / 2;
+    
+    // For GPU version, we'll use a simplified approach:
+    // Copy to host, compute gradients on CPU, then copy back
+    // This ensures correctness while avoiding complex GPU kernel development
+    
+    float* h_A_grad = (float*)malloc(n * n * sizeof(float));
+    float* h_rotation_angles = (float*)malloc(num_angles * sizeof(float));
+    float* h_rotation_grad = (float*)malloc(num_angles * sizeof(float));
+    
+    // Copy from device to host
+    CHECK_CUDA(cudaMemcpy(h_A_grad, d_A_orthogonal_grad, n * n * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_rotation_angles, ssm->d_rotation_angles, num_angles * sizeof(float), cudaMemcpyDeviceToHost));
+    
+    // Initialize rotation angle gradients to zero
+    memset(h_rotation_grad, 0, num_angles * sizeof(float));
+    
+    // Create a copy of the current orthogonal matrix on host
+    float* A_temp = (float*)malloc(n * n * sizeof(float));
+    
+    // Rebuild orthogonal matrix on host for gradient computation
+    memset(A_temp, 0, n * n * sizeof(float));
+    for (int i = 0; i < n; i++) {
+        A_temp[i * n + i] = 1.0f;
+    }
+    
+    int angle_idx = 0;
+    for (int i = 1; i < n; i++) {
+        for (int j = 0; j < i; j++) {
+            float theta = h_rotation_angles[angle_idx++];
+            float cos_theta = cosf(theta);
+            float sin_theta = sinf(theta);
+            
+            // Apply Givens rotation to A_temp
+            for (int k = 0; k < n; k++) {
+                float a_ik = A_temp[i * n + k];
+                float a_jk = A_temp[j * n + k];
+                A_temp[i * n + k] = cos_theta * a_ik - sin_theta * a_jk;
+                A_temp[j * n + k] = sin_theta * a_ik + cos_theta * a_jk;
+            }
+        }
+    }
+    
+    // Apply chain rule through each Givens rotation in reverse order
+    angle_idx = num_angles - 1;
+    for (int i = n - 1; i >= 1; i--) {
+        for (int j = i - 1; j >= 0; j--) {
+            float theta = h_rotation_angles[angle_idx];
+            float cos_theta = cosf(theta);
+            float sin_theta = sinf(theta);
+            
+            // Compute derivative of loss w.r.t. this rotation angle
+            float grad_theta = 0.0f;
+            for (int k = 0; k < n; k++) {
+                float grad_i_k = h_A_grad[i * n + k];
+                float grad_j_k = h_A_grad[j * n + k];
+                float a_i_k = A_temp[i * n + k];
+                float a_j_k = A_temp[j * n + k];
+                
+                grad_theta += grad_i_k * (-sin_theta * a_i_k - cos_theta * a_j_k);
+                grad_theta += grad_j_k * (cos_theta * a_i_k - sin_theta * a_j_k);
+            }
+            
+            h_rotation_grad[angle_idx] = grad_theta;
+            
+            // Update gradients by applying the transpose of this Givens rotation
+            for (int k = 0; k < n; k++) {
+                float grad_i_k = h_A_grad[i * n + k];
+                float grad_j_k = h_A_grad[j * n + k];
+                h_A_grad[i * n + k] = cos_theta * grad_i_k + sin_theta * grad_j_k;
+                h_A_grad[j * n + k] = -sin_theta * grad_i_k + cos_theta * grad_j_k;
+            }
+            
+            // Also apply transpose to the accumulated matrix for next iteration
+            for (int k = 0; k < n; k++) {
+                float a_ik = A_temp[i * n + k];
+                float a_jk = A_temp[j * n + k];
+                A_temp[i * n + k] = cos_theta * a_ik - sin_theta * a_jk;
+                A_temp[j * n + k] = sin_theta * a_ik + cos_theta * a_jk;
+            }
+            
+            angle_idx--;
+        }
+    }
+    
+    // Copy gradients back to device
+    CHECK_CUDA(cudaMemcpy(ssm->d_rotation_angles_grad, h_rotation_grad, num_angles * sizeof(float), cudaMemcpyHostToDevice));
+    
+    free(h_A_grad);
+    free(h_rotation_angles);
+    free(h_rotation_grad);
+    free(A_temp);
+}
 // Backward pass
 void backward_pass_ssm(SSM* ssm, float* d_X) {
     const float alpha = 1.0f;
@@ -313,6 +413,11 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
     
     // Clear state errors
     CHECK_CUDA(cudaMemset(ssm->d_state_error, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float)));
+    
+    // Allocate temporary gradient for A_orthogonal
+    float* d_A_orthogonal_grad;
+    CHECK_CUDA(cudaMalloc(&d_A_orthogonal_grad, ssm->state_dim * ssm->state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(d_A_orthogonal_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float)));
     
     for (int t = ssm->seq_len - 1; t >= 0; t--) {
         float* d_X_t = d_X + t * ssm->batch_size * ssm->input_dim;
@@ -351,13 +456,13 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
         int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
         swish_backward_kernel_ssm<<<num_blocks, block_size>>>(d_dh_t, d_do_t, d_h_t, ssm->batch_size * ssm->state_dim);
         
-        // ∂L/∂H_t += (∂L/∂H_{t+1})A
+        // ∂L/∂H_t += (∂L/∂H_{t+1})A_orthogonal
         if (t < ssm->seq_len - 1) {
             float* d_dh_next = ssm->d_state_error + (t+1) * ssm->batch_size * ssm->state_dim;
             CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                     CUBLAS_OP_N, CUBLAS_OP_N,
                                     ssm->state_dim, ssm->batch_size, ssm->state_dim,
-                                    &alpha, ssm->d_A, ssm->state_dim,
+                                    &alpha, ssm->d_A_orthogonal, ssm->state_dim,
                                     d_dh_next, ssm->state_dim,
                                     &beta_add, d_dh_t, ssm->state_dim));
         }
@@ -370,7 +475,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 d_dh_t, ssm->state_dim,
                                 &beta_add, ssm->d_B_grad, ssm->input_dim));
         
-        // ∂L/∂A += (∂L/∂H_t)^T H_{t-1}
+        // ∂L/∂A_orthogonal += (∂L/∂H_t)^T H_{t-1}
         if (t > 0) {
             float* d_h_prev = ssm->d_states + (t-1) * ssm->batch_size * ssm->state_dim;
             CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
@@ -378,9 +483,14 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                     ssm->state_dim, ssm->state_dim, ssm->batch_size,
                                     &alpha, d_h_prev, ssm->state_dim,
                                     d_dh_t, ssm->state_dim,
-                                    &beta_add, ssm->d_A_grad, ssm->state_dim));
+                                    &beta_add, d_A_orthogonal_grad, ssm->state_dim));
         }
     }
+    
+    // Compute gradients w.r.t. rotation angles using chain rule
+    compute_rotation_gradients_gpu(ssm, d_A_orthogonal_grad);
+    
+    cudaFree(d_A_orthogonal_grad);
 }
 
 // CUDA kernel for AdamW update
@@ -411,14 +521,14 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
     
     int block_size = 256;
+    int num_angles = ssm->state_dim * (ssm->state_dim - 1) / 2;
     
-    // Update A
-    int A_size = ssm->state_dim * ssm->state_dim;
-    int A_blocks = (A_size + block_size - 1) / block_size;
-    adamw_update_kernel_ssm<<<A_blocks, block_size>>>(
-        ssm->d_A, ssm->d_A_grad, ssm->d_A_m, ssm->d_A_v,
+    // Update rotation_angles
+    int angles_blocks = (num_angles + block_size - 1) / block_size;
+    adamw_update_kernel_ssm<<<angles_blocks, block_size>>>(
+        ssm->d_rotation_angles, ssm->d_rotation_angles_grad, ssm->d_rotation_angles_m, ssm->d_rotation_angles_v,
         ssm->beta1, ssm->beta2, ssm->epsilon, learning_rate, ssm->weight_decay,
-        alpha_t, A_size, ssm->batch_size
+        alpha_t, num_angles, ssm->batch_size
     );
     
     // Update B
@@ -451,14 +561,16 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
 
 // Save model
 void save_ssm(SSM* ssm, const char* filename) {
+    int num_angles = ssm->state_dim * (ssm->state_dim - 1) / 2;
+    
     // Allocate temporary host memory
-    float* A = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
+    float* rotation_angles = (float*)malloc(num_angles * sizeof(float));
     float* B = (float*)malloc(ssm->state_dim * ssm->input_dim * sizeof(float));
     float* C = (float*)malloc(ssm->output_dim * ssm->state_dim * sizeof(float));
     float* D = (float*)malloc(ssm->output_dim * ssm->input_dim * sizeof(float));
     
     // Copy matrices from device to host
-    CHECK_CUDA(cudaMemcpy(A, ssm->d_A, ssm->state_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(rotation_angles, ssm->d_rotation_angles, num_angles * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(B, ssm->d_B, ssm->state_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(C, ssm->d_C, ssm->output_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(D, ssm->d_D, ssm->output_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
@@ -466,7 +578,7 @@ void save_ssm(SSM* ssm, const char* filename) {
     FILE* file = fopen(filename, "wb");
     if (!file) {
         printf("Error opening file for writing: %s\n", filename);
-        free(A); free(B); free(C); free(D);
+        free(rotation_angles); free(B); free(C); free(D);
         return;
     }
     
@@ -477,8 +589,8 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(&ssm->seq_len, sizeof(int), 1, file);
     fwrite(&ssm->batch_size, sizeof(int), 1, file);
     
-    // Save matrices
-    fwrite(A, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    // Save rotation angles and matrices
+    fwrite(rotation_angles, sizeof(float), num_angles, file);
     fwrite(B, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(C, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(D, sizeof(float), ssm->output_dim * ssm->input_dim, file);
@@ -486,8 +598,8 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(&ssm->t, sizeof(int), 1, file);
     
     // Save Adam state
-    float* A_m = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
-    float* A_v = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
+    float* rotation_angles_m = (float*)malloc(num_angles * sizeof(float));
+    float* rotation_angles_v = (float*)malloc(num_angles * sizeof(float));
     float* B_m = (float*)malloc(ssm->state_dim * ssm->input_dim * sizeof(float));
     float* B_v = (float*)malloc(ssm->state_dim * ssm->input_dim * sizeof(float));
     float* C_m = (float*)malloc(ssm->output_dim * ssm->state_dim * sizeof(float));
@@ -495,8 +607,8 @@ void save_ssm(SSM* ssm, const char* filename) {
     float* D_m = (float*)malloc(ssm->output_dim * ssm->input_dim * sizeof(float));
     float* D_v = (float*)malloc(ssm->output_dim * ssm->input_dim * sizeof(float));
     
-    CHECK_CUDA(cudaMemcpy(A_m, ssm->d_A_m, ssm->state_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(A_v, ssm->d_A_v, ssm->state_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(rotation_angles_m, ssm->d_rotation_angles_m, num_angles * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(rotation_angles_v, ssm->d_rotation_angles_v, num_angles * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(B_m, ssm->d_B_m, ssm->state_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(B_v, ssm->d_B_v, ssm->state_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(C_m, ssm->d_C_m, ssm->output_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
@@ -504,8 +616,8 @@ void save_ssm(SSM* ssm, const char* filename) {
     CHECK_CUDA(cudaMemcpy(D_m, ssm->d_D_m, ssm->output_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(D_v, ssm->d_D_v, ssm->output_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     
-    fwrite(A_m, sizeof(float), ssm->state_dim * ssm->state_dim, file);
-    fwrite(A_v, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    fwrite(rotation_angles_m, sizeof(float), num_angles, file);
+    fwrite(rotation_angles_v, sizeof(float), num_angles, file);
     fwrite(B_m, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(B_v, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(C_m, sizeof(float), ssm->output_dim * ssm->state_dim, file);
@@ -514,8 +626,8 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(D_v, sizeof(float), ssm->output_dim * ssm->input_dim, file);
     
     // Free temporary host memory
-    free(A); free(B); free(C); free(D);
-    free(A_m); free(A_v); free(B_m); free(B_v);
+    free(rotation_angles); free(B); free(C); free(D);
+    free(rotation_angles_m); free(rotation_angles_v); free(B_m); free(B_v);
     free(C_m); free(C_v); free(D_m); free(D_v);
     
     fclose(file);
@@ -539,18 +651,19 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(&stored_batch_size, sizeof(int), 1, file);
     
     int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
+    int num_angles = state_dim * (state_dim - 1) / 2;
     
     // Initialize model
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
     
     // Allocate temporary host memory
-    float* A = (float*)malloc(state_dim * state_dim * sizeof(float));
+    float* rotation_angles = (float*)malloc(num_angles * sizeof(float));
     float* B = (float*)malloc(state_dim * input_dim * sizeof(float));
     float* C = (float*)malloc(output_dim * state_dim * sizeof(float));
     float* D = (float*)malloc(output_dim * input_dim * sizeof(float));
     
-    // Load matrices
-    fread(A, sizeof(float), state_dim * state_dim, file);
+    // Load rotation angles and matrices
+    fread(rotation_angles, sizeof(float), num_angles, file);
     fread(B, sizeof(float), state_dim * input_dim, file);
     fread(C, sizeof(float), output_dim * state_dim, file);
     fread(D, sizeof(float), output_dim * input_dim, file);
@@ -558,14 +671,14 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(&ssm->t, sizeof(int), 1, file);
     
     // Copy matrices to device
-    CHECK_CUDA(cudaMemcpy(ssm->d_A, A, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_rotation_angles, rotation_angles, num_angles * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_B, B, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_C, C, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_D, D, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     // Load Adam state
-    float* A_m = (float*)malloc(state_dim * state_dim * sizeof(float));
-    float* A_v = (float*)malloc(state_dim * state_dim * sizeof(float));
+    float* rotation_angles_m = (float*)malloc(num_angles * sizeof(float));
+    float* rotation_angles_v = (float*)malloc(num_angles * sizeof(float));
     float* B_m = (float*)malloc(state_dim * input_dim * sizeof(float));
     float* B_v = (float*)malloc(state_dim * input_dim * sizeof(float));
     float* C_m = (float*)malloc(output_dim * state_dim * sizeof(float));
@@ -573,8 +686,8 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     float* D_m = (float*)malloc(output_dim * input_dim * sizeof(float));
     float* D_v = (float*)malloc(output_dim * input_dim * sizeof(float));
     
-    fread(A_m, sizeof(float), state_dim * state_dim, file);
-    fread(A_v, sizeof(float), state_dim * state_dim, file);
+    fread(rotation_angles_m, sizeof(float), num_angles, file);
+    fread(rotation_angles_v, sizeof(float), num_angles, file);
     fread(B_m, sizeof(float), state_dim * input_dim, file);
     fread(B_v, sizeof(float), state_dim * input_dim, file);
     fread(C_m, sizeof(float), output_dim * state_dim, file);
@@ -583,8 +696,8 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(D_v, sizeof(float), output_dim * input_dim, file);
     
     // Copy Adam state to device
-    CHECK_CUDA(cudaMemcpy(ssm->d_A_m, A_m, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_A_v, A_v, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_rotation_angles_m, rotation_angles_m, num_angles * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_rotation_angles_v, rotation_angles_v, num_angles * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_B_m, B_m, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_B_v, B_v, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_C_m, C_m, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
@@ -592,9 +705,12 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     CHECK_CUDA(cudaMemcpy(ssm->d_D_m, D_m, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_D_v, D_v, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     
+    // Build orthogonal A matrix from loaded rotation angles
+    build_orthogonal_from_angles(ssm);
+    
     // Free temporary host memory
-    free(A); free(B); free(C); free(D);
-    free(A_m); free(A_v); free(B_m); free(B_v);
+    free(rotation_angles); free(B); free(C); free(D);
+    free(rotation_angles_m); free(rotation_angles_v); free(B_m); free(B_v);
     free(C_m); free(C_v); free(D_m); free(D_v);
     
     fclose(file);
