@@ -9,19 +9,24 @@
 
 typedef struct {
     // State space matrices
-    float* A;           // state_dim x state_dim (state transition)
+    float* A;           // state_dim x state_dim (state transition) - deprecated, kept for compatibility
     float* B;           // state_dim x input_dim (input to state)
     float* C;           // output_dim x state_dim (state to output)
     float* D;           // output_dim x input_dim (input to output)
     
-    // Gradients
-    float* A_grad;      // state_dim x state_dim
-    float* B_grad;      // state_dim x input_dim
-    float* C_grad;      // output_dim x state_dim
-    float* D_grad;      // output_dim x input_dim
+    // Orthogonal parameterization using Givens rotations
+    float* rotation_angles;     // n(n-1)/2 rotation angles for Givens rotations
+    float* A_orthogonal;        // state_dim x state_dim orthogonal matrix constructed from angles
     
-    // Adam parameters for A, B, C, D
-    float* A_m; float* A_v;
+    // Gradients
+    float* A_grad;              // state_dim x state_dim - deprecated, kept for compatibility
+    float* rotation_angles_grad;// n(n-1)/2 gradients for rotation angles
+    float* B_grad;              // state_dim x input_dim
+    float* C_grad;              // output_dim x state_dim
+    float* D_grad;              // output_dim x input_dim
+    
+    // Adam parameters for rotation_angles, B, C, D
+    float* rotation_angles_m; float* rotation_angles_v;
     float* B_m; float* B_v;
     float* C_m; float* C_v;
     float* D_m; float* D_v;
@@ -49,6 +54,8 @@ typedef struct {
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
 void free_ssm(SSM* ssm);
 void reset_state_ssm(SSM* ssm);
+void build_orthogonal_from_angles(SSM* ssm);
+void apply_givens_rotation(float* matrix, int n, int i, int j, float cos_theta, float sin_theta);
 void forward_pass_ssm(SSM* ssm, float* X_t, int timestep);
 float calculate_loss_ssm(SSM* ssm, float* y);
 void zero_gradients_ssm(SSM* ssm);

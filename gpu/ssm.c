@@ -1,5 +1,62 @@
 #include "ssm.h"
 
+// CUDA kernel for applying Givens rotation to matrix at positions (i,j)
+__global__ void apply_givens_rotation_kernel_ssm(float* matrix, int n, int i, int j, float cos_theta, float sin_theta) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < n) {
+        float a_ik = matrix[i * n + k];
+        float a_jk = matrix[j * n + k];
+        matrix[i * n + k] = cos_theta * a_ik - sin_theta * a_jk;
+        matrix[j * n + k] = sin_theta * a_ik + cos_theta * a_jk;
+    }
+}
+
+// CUDA kernel for building orthogonal matrix from rotation angles
+__global__ void build_orthogonal_kernel_ssm(float* A_orthogonal, float* rotation_angles, int state_dim) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_size = state_dim * state_dim;
+    
+    if (idx < total_size) {
+        int i = idx / state_dim;
+        int j = idx % state_dim;
+        
+        // Initialize to identity
+        A_orthogonal[idx] = (i == j) ? 1.0f : 0.0f;
+    }
+    
+    __syncthreads();
+    
+    // Apply Givens rotations (this needs to be done sequentially on GPU)
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        int angle_idx = 0;
+        for (int i = 1; i < state_dim; i++) {
+            for (int j = 0; j < i; j++) {
+                float theta = rotation_angles[angle_idx++];
+                float cos_theta = cosf(theta);
+                float sin_theta = sinf(theta);
+                
+                // Apply rotation to all columns
+                for (int k = 0; k < state_dim; k++) {
+                    float a_ik = A_orthogonal[i * state_dim + k];
+                    float a_jk = A_orthogonal[j * state_dim + k];
+                    A_orthogonal[i * state_dim + k] = cos_theta * a_ik - sin_theta * a_jk;
+                    A_orthogonal[j * state_dim + k] = sin_theta * a_ik + cos_theta * a_jk;
+                }
+            }
+        }
+    }
+}
+
+// Build orthogonal matrix from rotation angles (host function)
+void build_orthogonal_from_angles(SSM* ssm) {
+    int block_size = 256;
+    int num_blocks = (ssm->state_dim * ssm->state_dim + block_size - 1) / block_size;
+    build_orthogonal_kernel_ssm<<<num_blocks, block_size>>>(
+        ssm->d_A_orthogonal, ssm->d_rotation_angles, ssm->state_dim
+    );
+    CHECK_CUDA(cudaDeviceSynchronize());
+}
+
 // Initialize the state space model
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size) {
     SSM* ssm = (SSM*)malloc(sizeof(SSM));
@@ -22,8 +79,12 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUBLAS(cublasCreate(&ssm->cublas_handle));
     CHECK_CUBLAS(cublasSetMathMode(ssm->cublas_handle, CUBLAS_TENSOR_OP_MATH));
     
+    // Calculate number of rotation angles: n(n-1)/2
+    int num_angles = state_dim * (state_dim - 1) / 2;
+    
     // Allocate host memory for initialization
-    float* A = (float*)calloc(state_dim * state_dim, sizeof(float));
+    float* A = (float*)calloc(state_dim * state_dim, sizeof(float)); // Keep for compatibility
+    float* rotation_angles = (float*)malloc(num_angles * sizeof(float));
     float* B = (float*)malloc(state_dim * input_dim * sizeof(float));
     float* C = (float*)malloc(output_dim * state_dim * sizeof(float));
     float* D = (float*)malloc(output_dim * input_dim * sizeof(float));
@@ -45,54 +106,29 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
         D[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_D;
     }
     
-    // HiPPO-Leg inspired initialization for A matrix
-    // Creates a lower triangular structure optimized for memory compression
-    // and long-range dependency modeling
-    
-    // Create base lower triangular structure
-    for (int i = 0; i < state_dim; i++) {
-        for (int j = 0; j <= i; j++) {
-            if (i == j) {
-                // Diagonal: negative values that increase in magnitude with index
-                // This creates a structured forgetting pattern
-                A[i * state_dim + j] = -0.01f - (i * 0.001f / state_dim);
-            } else {
-                // Off-diagonal: small positive values that decay with distance
-                // This enables information flow between nearby state components
-                float distance = i - j;
-                A[i * state_dim + j] = 0.001f / (1.0f + distance * 0.1f);
-            }
-        }
-    }
-    
-    // Apply Legendre polynomial scaling for optimal memory compression
-    // This gives higher-order basis functions more importance
-    float norm_factor = sqrtf(2.0f * state_dim + 1.0f);
-    for (int i = 0; i < state_dim; i++) {
-        float importance = sqrtf(2.0f * i + 1.0f);
-        float normalized_importance = 1.0f + 0.1f * importance / norm_factor;
-        
-        // Scale entire row by importance factor
-        for (int j = 0; j <= i; j++) {
-            A[i * state_dim + j] *= normalized_importance;
-        }
+    // Initialize rotation angles randomly in [-π/4, π/4] for stability
+    for (int i = 0; i < num_angles; i++) {
+        rotation_angles[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * (M_PI / 4.0f);
     }
     
     // Allocate device memory for matrices
-    CHECK_CUDA(cudaMalloc(&ssm->d_A, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A, state_dim * state_dim * sizeof(float))); // Keep for compatibility
+    CHECK_CUDA(cudaMalloc(&ssm->d_rotation_angles, num_angles * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_orthogonal, state_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_B, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_C, output_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_D, output_dim * input_dim * sizeof(float)));
     
     // Allocate device memory for gradients
-    CHECK_CUDA(cudaMalloc(&ssm->d_A_grad, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_grad, state_dim * state_dim * sizeof(float))); // Keep for compatibility
+    CHECK_CUDA(cudaMalloc(&ssm->d_rotation_angles_grad, num_angles * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_B_grad, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_C_grad, output_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_D_grad, output_dim * input_dim * sizeof(float)));
     
     // Allocate device memory for Adam parameters
-    CHECK_CUDA(cudaMalloc(&ssm->d_A_m, state_dim * state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_A_v, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_rotation_angles_m, num_angles * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_rotation_angles_v, num_angles * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_B_m, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_B_v, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_C_m, output_dim * state_dim * sizeof(float)));
@@ -108,14 +144,15 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&ssm->d_state_outputs, seq_len * batch_size * state_dim * sizeof(float)));
     
     // Copy initialized matrices to device
-    CHECK_CUDA(cudaMemcpy(ssm->d_A, A, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_A, A, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice)); // Keep for compatibility
+    CHECK_CUDA(cudaMemcpy(ssm->d_rotation_angles, rotation_angles, num_angles * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_B, B, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_C, C, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_D, D, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     // Initialize Adam parameters to zero
-    CHECK_CUDA(cudaMemset(ssm->d_A_m, 0, state_dim * state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(ssm->d_A_v, 0, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_rotation_angles_m, 0, num_angles * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_rotation_angles_v, 0, num_angles * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_B_m, 0, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_B_v, 0, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_C_m, 0, output_dim * state_dim * sizeof(float)));
@@ -123,8 +160,12 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMemset(ssm->d_D_m, 0, output_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_D_v, 0, output_dim * input_dim * sizeof(float)));
     
+    // Build initial orthogonal A matrix from rotation angles
+    build_orthogonal_from_angles(ssm);
+    
     // Free host memory
     free(A);
+    free(rotation_angles);
     free(B);
     free(C);
     free(D);
@@ -135,9 +176,12 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
 // Free memory
 void free_ssm(SSM* ssm) {
     // Free device memory
-    cudaFree(ssm->d_A); cudaFree(ssm->d_B); cudaFree(ssm->d_C); cudaFree(ssm->d_D);
-    cudaFree(ssm->d_A_grad); cudaFree(ssm->d_B_grad); cudaFree(ssm->d_C_grad); cudaFree(ssm->d_D_grad);
-    cudaFree(ssm->d_A_m); cudaFree(ssm->d_A_v); cudaFree(ssm->d_B_m); cudaFree(ssm->d_B_v);
+    cudaFree(ssm->d_A); cudaFree(ssm->d_rotation_angles); cudaFree(ssm->d_A_orthogonal);
+    cudaFree(ssm->d_B); cudaFree(ssm->d_C); cudaFree(ssm->d_D);
+    cudaFree(ssm->d_A_grad); cudaFree(ssm->d_rotation_angles_grad);
+    cudaFree(ssm->d_B_grad); cudaFree(ssm->d_C_grad); cudaFree(ssm->d_D_grad);
+    cudaFree(ssm->d_rotation_angles_m); cudaFree(ssm->d_rotation_angles_v);
+    cudaFree(ssm->d_B_m); cudaFree(ssm->d_B_v);
     cudaFree(ssm->d_C_m); cudaFree(ssm->d_C_v); cudaFree(ssm->d_D_m); cudaFree(ssm->d_D_v);
     cudaFree(ssm->d_states); cudaFree(ssm->d_predictions); cudaFree(ssm->d_error); 
     cudaFree(ssm->d_state_error); cudaFree(ssm->d_state_outputs);

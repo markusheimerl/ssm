@@ -34,19 +34,24 @@
 
 typedef struct {
     // Device pointers for state space matrices
-    float* d_A;           // state_dim x state_dim (state transition)
+    float* d_A;           // state_dim x state_dim (state transition) - deprecated, kept for compatibility
     float* d_B;           // state_dim x input_dim (input to state)
     float* d_C;           // output_dim x state_dim (state to output)
     float* d_D;           // output_dim x input_dim (input to output)
     
+    // Orthogonal parameterization using Givens rotations
+    float* d_rotation_angles;     // n(n-1)/2 rotation angles for Givens rotations
+    float* d_A_orthogonal;        // state_dim x state_dim orthogonal matrix constructed from angles
+    
     // Device pointers for gradients
-    float* d_A_grad;      // state_dim x state_dim
-    float* d_B_grad;      // state_dim x input_dim
-    float* d_C_grad;      // output_dim x state_dim
-    float* d_D_grad;      // output_dim x input_dim
+    float* d_A_grad;              // state_dim x state_dim - deprecated, kept for compatibility
+    float* d_rotation_angles_grad;// n(n-1)/2 gradients for rotation angles
+    float* d_B_grad;              // state_dim x input_dim
+    float* d_C_grad;              // output_dim x state_dim
+    float* d_D_grad;              // output_dim x input_dim
     
     // Device pointers for Adam parameters
-    float* d_A_m; float* d_A_v;
+    float* d_rotation_angles_m; float* d_rotation_angles_v;
     float* d_B_m; float* d_B_v;
     float* d_C_m; float* d_C_v;
     float* d_D_m; float* d_D_v;
@@ -78,11 +83,15 @@ __global__ void swish_forward_kernel_ssm(float* output, float* input, int size);
 __global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size);
 __global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y, int size);
 __global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int batch_size);
+__global__ void build_orthogonal_kernel_ssm(float* A_orthogonal, float* rotation_angles, int state_dim);
+__global__ void apply_givens_rotation_kernel_ssm(float* matrix, int n, int i, int j, float cos_theta, float sin_theta);
+__global__ void compute_rotation_gradients_kernel_ssm(float* rotation_grad, float* A_grad, float* rotation_angles, int state_dim, int angle_idx, int i, int j);
 
 // Function prototypes
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
 void free_ssm(SSM* ssm);
 void reset_state_ssm(SSM* ssm);
+void build_orthogonal_from_angles(SSM* ssm);
 void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep);
 float calculate_loss_ssm(SSM* ssm, float* d_y);
 void zero_gradients_ssm(SSM* ssm);

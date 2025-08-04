@@ -1,5 +1,93 @@
 #include "ssm.h"
 
+// Apply Givens rotation to matrix at positions (i,j)
+void apply_givens_rotation(float* matrix, int n, int i, int j, float cos_theta, float sin_theta) {
+    for (int k = 0; k < n; k++) {
+        float a_ik = matrix[i * n + k];
+        float a_jk = matrix[j * n + k];
+        matrix[i * n + k] = cos_theta * a_ik - sin_theta * a_jk;
+        matrix[j * n + k] = sin_theta * a_ik + cos_theta * a_jk;
+    }
+}
+
+// Build orthogonal matrix from rotation angles using sequential Givens rotations
+void build_orthogonal_from_angles(SSM* ssm) {
+    int n = ssm->state_dim;
+    
+    // Initialize A_orthogonal to identity matrix
+    memset(ssm->A_orthogonal, 0, n * n * sizeof(float));
+    for (int i = 0; i < n; i++) {
+        ssm->A_orthogonal[i * n + i] = 1.0f;
+    }
+    
+    // Apply Givens rotations
+    int angle_idx = 0;
+    for (int i = 1; i < n; i++) {
+        for (int j = 0; j < i; j++) {
+            float theta = ssm->rotation_angles[angle_idx++];
+            float cos_theta = cosf(theta);
+            float sin_theta = sinf(theta);
+            apply_givens_rotation(ssm->A_orthogonal, n, i, j, cos_theta, sin_theta);
+        }
+    }
+}
+
+// Compute gradients of rotation angles from gradients of orthogonal matrix
+void compute_rotation_gradients(SSM* ssm, float* A_orthogonal_grad) {
+    int n = ssm->state_dim;
+    int num_angles = n * (n - 1) / 2;
+    
+    // Initialize rotation angle gradients to zero
+    memset(ssm->rotation_angles_grad, 0, num_angles * sizeof(float));
+    
+    // Create a copy of the current orthogonal matrix
+    float* A_temp = (float*)malloc(n * n * sizeof(float));
+    memcpy(A_temp, ssm->A_orthogonal, n * n * sizeof(float));
+    
+    // Apply chain rule through each Givens rotation in reverse order
+    int angle_idx = num_angles - 1;
+    for (int i = n - 1; i >= 1; i--) {
+        for (int j = i - 1; j >= 0; j--) {
+            float theta = ssm->rotation_angles[angle_idx];
+            float cos_theta = cosf(theta);
+            float sin_theta = sinf(theta);
+            
+            // Compute derivative of loss w.r.t. this rotation angle
+            float grad_theta = 0.0f;
+            for (int k = 0; k < n; k++) {
+                // Derivative of G * R w.r.t. theta where G is the accumulated gradient
+                // and R is the current Givens rotation
+                float grad_i_k = A_orthogonal_grad[i * n + k];
+                float grad_j_k = A_orthogonal_grad[j * n + k];
+                float a_i_k = A_temp[i * n + k];
+                float a_j_k = A_temp[j * n + k];
+                
+                // ∂/∂θ (cos(θ) * a_ik - sin(θ) * a_jk) = -sin(θ) * a_ik - cos(θ) * a_jk
+                // ∂/∂θ (sin(θ) * a_ik + cos(θ) * a_jk) = cos(θ) * a_ik - sin(θ) * a_jk
+                grad_theta += grad_i_k * (-sin_theta * a_i_k - cos_theta * a_j_k);
+                grad_theta += grad_j_k * (cos_theta * a_i_k - sin_theta * a_j_k);
+            }
+            
+            ssm->rotation_angles_grad[angle_idx] = grad_theta;
+            
+            // Update gradients by applying the transpose of this Givens rotation
+            for (int k = 0; k < n; k++) {
+                float grad_i_k = A_orthogonal_grad[i * n + k];
+                float grad_j_k = A_orthogonal_grad[j * n + k];
+                A_orthogonal_grad[i * n + k] = cos_theta * grad_i_k + sin_theta * grad_j_k;
+                A_orthogonal_grad[j * n + k] = -sin_theta * grad_i_k + cos_theta * grad_j_k;
+            }
+            
+            // Also apply transpose to the accumulated matrix for next iteration
+            apply_givens_rotation(A_temp, n, i, j, cos_theta, sin_theta);
+            
+            angle_idx--;
+        }
+    }
+    
+    free(A_temp);
+}
+
 // Initialize the state space model
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size) {
     SSM* ssm = (SSM*)malloc(sizeof(SSM));
@@ -18,21 +106,27 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->t = 0;
     ssm->weight_decay = 0.001f;
     
+    // Calculate number of rotation angles: n(n-1)/2
+    int num_angles = state_dim * (state_dim - 1) / 2;
+    
     // Allocate state space matrices
-    ssm->A = (float*)calloc(state_dim * state_dim, sizeof(float));
+    ssm->A = (float*)calloc(state_dim * state_dim, sizeof(float)); // Keep for compatibility
+    ssm->rotation_angles = (float*)malloc(num_angles * sizeof(float));
+    ssm->A_orthogonal = (float*)malloc(state_dim * state_dim * sizeof(float));
     ssm->B = (float*)malloc(state_dim * input_dim * sizeof(float));
     ssm->C = (float*)malloc(output_dim * state_dim * sizeof(float));
     ssm->D = (float*)malloc(output_dim * input_dim * sizeof(float));
     
     // Allocate gradients
-    ssm->A_grad = (float*)malloc(state_dim * state_dim * sizeof(float));
+    ssm->A_grad = (float*)malloc(state_dim * state_dim * sizeof(float)); // Keep for compatibility
+    ssm->rotation_angles_grad = (float*)malloc(num_angles * sizeof(float));
     ssm->B_grad = (float*)malloc(state_dim * input_dim * sizeof(float));
     ssm->C_grad = (float*)malloc(output_dim * state_dim * sizeof(float));
     ssm->D_grad = (float*)malloc(output_dim * input_dim * sizeof(float));
     
     // Allocate Adam buffers
-    ssm->A_m = (float*)calloc(state_dim * state_dim, sizeof(float));
-    ssm->A_v = (float*)calloc(state_dim * state_dim, sizeof(float));
+    ssm->rotation_angles_m = (float*)calloc(num_angles, sizeof(float));
+    ssm->rotation_angles_v = (float*)calloc(num_angles, sizeof(float));
     ssm->B_m = (float*)calloc(state_dim * input_dim, sizeof(float));
     ssm->B_v = (float*)calloc(state_dim * input_dim, sizeof(float));
     ssm->C_m = (float*)calloc(output_dim * state_dim, sizeof(float));
@@ -64,48 +158,25 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
         ssm->D[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_D;
     }
     
-    // HiPPO-Leg inspired initialization for A matrix
-    // Creates a lower triangular structure optimized for memory compression
-    // and long-range dependency modeling
-    // Note: A is already zero-initialized by calloc above
-    
-    // Phase 1: Create base lower triangular structure
-    for (int i = 0; i < state_dim; i++) {
-        for (int j = 0; j <= i; j++) {
-            if (i == j) {
-                // Diagonal: negative values that increase in magnitude with index
-                // This creates a structured forgetting pattern
-                ssm->A[i * state_dim + j] = -0.01f - (i * 0.001f / state_dim);
-            } else {
-                // Off-diagonal: small positive values that decay with distance
-                // This enables information flow between nearby state components
-                float distance = i - j;
-                ssm->A[i * state_dim + j] = 0.001f / (1.0f + distance * 0.1f);
-            }
-        }
+    // Initialize rotation angles randomly in [-π/4, π/4] for stability
+    for (int i = 0; i < num_angles; i++) {
+        ssm->rotation_angles[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * (M_PI / 4.0f);
     }
     
-    // Phase 2: Apply Legendre polynomial scaling for optimal memory compression
-    // This gives higher-order basis functions more importance
-    float norm_factor = sqrtf(2.0f * state_dim + 1.0f);
-    for (int i = 0; i < state_dim; i++) {
-        float importance = sqrtf(2.0f * i + 1.0f);
-        float normalized_importance = 1.0f + 0.1f * importance / norm_factor;
-        
-        // Scale entire row by importance factor
-        for (int j = 0; j <= i; j++) {
-            ssm->A[i * state_dim + j] *= normalized_importance;
-        }
-    }
+    // Build initial orthogonal A matrix from rotation angles
+    build_orthogonal_from_angles(ssm);
     
     return ssm;
 }
 
 // Free memory
 void free_ssm(SSM* ssm) {
-    free(ssm->A); free(ssm->B); free(ssm->C); free(ssm->D);
-    free(ssm->A_grad); free(ssm->B_grad); free(ssm->C_grad); free(ssm->D_grad);
-    free(ssm->A_m); free(ssm->A_v); free(ssm->B_m); free(ssm->B_v);
+    free(ssm->A); free(ssm->rotation_angles); free(ssm->A_orthogonal);
+    free(ssm->B); free(ssm->C); free(ssm->D);
+    free(ssm->A_grad); free(ssm->rotation_angles_grad);
+    free(ssm->B_grad); free(ssm->C_grad); free(ssm->D_grad);
+    free(ssm->rotation_angles_m); free(ssm->rotation_angles_v);
+    free(ssm->B_m); free(ssm->B_v);
     free(ssm->C_m); free(ssm->C_v); free(ssm->D_m); free(ssm->D_v);
     free(ssm->states); free(ssm->predictions); free(ssm->error); free(ssm->state_error);
     free(ssm->state_outputs);
@@ -119,13 +190,16 @@ void reset_state_ssm(SSM* ssm) {
 
 // Forward pass
 void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
+    // Build orthogonal A matrix from current rotation angles
+    build_orthogonal_from_angles(ssm);
+    
     // Get pointers to current timestep state
     float* h_prev = (timestep > 0) ? ssm->states + (timestep - 1) * ssm->batch_size * ssm->state_dim : NULL;
     float* h_t = ssm->states + timestep * ssm->batch_size * ssm->state_dim;
     float* o_t = ssm->state_outputs + timestep * ssm->batch_size * ssm->state_dim;
     float* y_t = ssm->predictions + timestep * ssm->batch_size * ssm->output_dim;
         
-    // H_t = X_t B^T + H_{t-1} A^T
+    // H_t = X_t B^T + H_{t-1} A_orthogonal^T
     // H_t = X_t B^T
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 ssm->batch_size, ssm->state_dim, ssm->input_dim,
@@ -133,12 +207,12 @@ void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
                 ssm->B, ssm->input_dim,
                 0.0f, h_t, ssm->state_dim);
     
-    // H_t += H_{t-1} A^T
+    // H_t += H_{t-1} A_orthogonal^T
     if (timestep > 0) {
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                     ssm->batch_size, ssm->state_dim, ssm->state_dim,
                     1.0f, h_prev, ssm->state_dim,
-                    ssm->A, ssm->state_dim,
+                    ssm->A_orthogonal, ssm->state_dim,
                     1.0f, h_t, ssm->state_dim);
     }
     
@@ -179,7 +253,8 @@ float calculate_loss_ssm(SSM* ssm, float* y) {
 
 // Zero gradients
 void zero_gradients_ssm(SSM* ssm) {
-    memset(ssm->A_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float));
+    int num_angles = ssm->state_dim * (ssm->state_dim - 1) / 2;
+    memset(ssm->rotation_angles_grad, 0, num_angles * sizeof(float));
     memset(ssm->B_grad, 0, ssm->state_dim * ssm->input_dim * sizeof(float));
     memset(ssm->C_grad, 0, ssm->output_dim * ssm->state_dim * sizeof(float));
     memset(ssm->D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(float));
@@ -189,6 +264,9 @@ void zero_gradients_ssm(SSM* ssm) {
 void backward_pass_ssm(SSM* ssm, float* X) {
     // Clear state errors
     memset(ssm->state_error, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float));
+    
+    // Allocate temporary gradient for A_orthogonal
+    float* A_orthogonal_grad = (float*)calloc(ssm->state_dim * ssm->state_dim, sizeof(float));
     
     for (int t = ssm->seq_len - 1; t >= 0; t--) {
         float* X_t = X + t * ssm->batch_size * ssm->input_dim;
@@ -226,13 +304,13 @@ void backward_pass_ssm(SSM* ssm, float* X) {
             dh_t[i] = do_t[i] * sigmoid * (1.0f + h * (1.0f - sigmoid));
         }
         
-        // ∂L/∂H_t += (∂L/∂H_{t+1})A
+        // ∂L/∂H_t += (∂L/∂H_{t+1})A_orthogonal
         if (t < ssm->seq_len - 1) {
             float* dh_next = ssm->state_error + (t+1) * ssm->batch_size * ssm->state_dim;
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                         ssm->batch_size, ssm->state_dim, ssm->state_dim,
                         1.0f, dh_next, ssm->state_dim,
-                        ssm->A, ssm->state_dim,
+                        ssm->A_orthogonal, ssm->state_dim,
                         1.0f, dh_t, ssm->state_dim);
         }
         
@@ -243,16 +321,21 @@ void backward_pass_ssm(SSM* ssm, float* X) {
                     X_t, ssm->input_dim,
                     1.0f, ssm->B_grad, ssm->input_dim);
         
-        // ∂L/∂A += (∂L/∂H_t)^T H_{t-1}
+        // ∂L/∂A_orthogonal += (∂L/∂H_t)^T H_{t-1}
         if (t > 0) {
             float* h_prev = ssm->states + (t-1) * ssm->batch_size * ssm->state_dim;
             cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                         ssm->state_dim, ssm->state_dim, ssm->batch_size,
                         1.0f, dh_t, ssm->state_dim,
                         h_prev, ssm->state_dim,
-                        1.0f, ssm->A_grad, ssm->state_dim);
+                        1.0f, A_orthogonal_grad, ssm->state_dim);
         }
     }
+    
+    // Compute gradients w.r.t. rotation angles using chain rule
+    compute_rotation_gradients(ssm, A_orthogonal_grad);
+    
+    free(A_orthogonal_grad);
 }
 
 // Update weights using AdamW
@@ -263,13 +346,15 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     float beta2_t = powf(ssm->beta2, ssm->t);
     float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
     
-    // Update A
-    for (int i = 0; i < ssm->state_dim * ssm->state_dim; i++) {
-        float grad = ssm->A_grad[i] / ssm->batch_size;
-        ssm->A_m[i] = ssm->beta1 * ssm->A_m[i] + (1.0f - ssm->beta1) * grad;
-        ssm->A_v[i] = ssm->beta2 * ssm->A_v[i] + (1.0f - ssm->beta2) * grad * grad;
-        float update = alpha_t * ssm->A_m[i] / (sqrtf(ssm->A_v[i]) + ssm->epsilon);
-        ssm->A[i] = ssm->A[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
+    int num_angles = ssm->state_dim * (ssm->state_dim - 1) / 2;
+    
+    // Update rotation_angles
+    for (int i = 0; i < num_angles; i++) {
+        float grad = ssm->rotation_angles_grad[i] / ssm->batch_size;
+        ssm->rotation_angles_m[i] = ssm->beta1 * ssm->rotation_angles_m[i] + (1.0f - ssm->beta1) * grad;
+        ssm->rotation_angles_v[i] = ssm->beta2 * ssm->rotation_angles_v[i] + (1.0f - ssm->beta2) * grad * grad;
+        float update = alpha_t * ssm->rotation_angles_m[i] / (sqrtf(ssm->rotation_angles_v[i]) + ssm->epsilon);
+        ssm->rotation_angles[i] = ssm->rotation_angles[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
     }
     
     // Update B
@@ -315,16 +400,18 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(&ssm->seq_len, sizeof(int), 1, file);
     fwrite(&ssm->batch_size, sizeof(int), 1, file);
     
-    // Save matrices
-    fwrite(ssm->A, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    int num_angles = ssm->state_dim * (ssm->state_dim - 1) / 2;
+    
+    // Save rotation angles and matrices
+    fwrite(ssm->rotation_angles, sizeof(float), num_angles, file);
     fwrite(ssm->B, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(ssm->C, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(ssm->D, sizeof(float), ssm->output_dim * ssm->input_dim, file);
     
     // Save Adam state
     fwrite(&ssm->t, sizeof(int), 1, file);
-    fwrite(ssm->A_m, sizeof(float), ssm->state_dim * ssm->state_dim, file);
-    fwrite(ssm->A_v, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    fwrite(ssm->rotation_angles_m, sizeof(float), num_angles, file);
+    fwrite(ssm->rotation_angles_v, sizeof(float), num_angles, file);
     fwrite(ssm->B_m, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(ssm->B_v, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(ssm->C_m, sizeof(float), ssm->output_dim * ssm->state_dim, file);
@@ -353,26 +440,30 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(&stored_batch_size, sizeof(int), 1, file);
     
     int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
+    int num_angles = state_dim * (state_dim - 1) / 2;
     
     // Initialize model
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
     
-    // Load matrices
-    fread(ssm->A, sizeof(float), state_dim * state_dim, file);
+    // Load rotation angles and matrices
+    fread(ssm->rotation_angles, sizeof(float), num_angles, file);
     fread(ssm->B, sizeof(float), state_dim * input_dim, file);
     fread(ssm->C, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D, sizeof(float), output_dim * input_dim, file);
     
     // Load Adam state
     fread(&ssm->t, sizeof(int), 1, file);
-    fread(ssm->A_m, sizeof(float), state_dim * state_dim, file);
-    fread(ssm->A_v, sizeof(float), state_dim * state_dim, file);
+    fread(ssm->rotation_angles_m, sizeof(float), num_angles, file);
+    fread(ssm->rotation_angles_v, sizeof(float), num_angles, file);
     fread(ssm->B_m, sizeof(float), state_dim * input_dim, file);
     fread(ssm->B_v, sizeof(float), state_dim * input_dim, file);
     fread(ssm->C_m, sizeof(float), output_dim * state_dim, file);
     fread(ssm->C_v, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D_m, sizeof(float), output_dim * input_dim, file);
     fread(ssm->D_v, sizeof(float), output_dim * input_dim, file);
+    
+    // Build orthogonal A matrix from loaded rotation angles
+    build_orthogonal_from_angles(ssm);
     
     fclose(file);
     printf("Model loaded from %s\n", filename);
