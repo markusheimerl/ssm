@@ -43,7 +43,7 @@ __global__ void compute_I_plus_minus_S_kernel(float* d_I_plus_S, float* d_I_minu
 void cayley_transform_gpu(float* d_A_skew, float* d_A_orthogonal, int state_dim, 
                          cusolverDnHandle_t cusolver_handle, 
                          float* d_workspace_S, float* d_workspace_I_plus_S, float* d_workspace_I_minus_S,
-                         int* d_workspace_ipiv, float* d_workspace_info) {
+                         int* d_workspace_ipiv, int* d_workspace_info, float* d_cusolver_workspace) {
     int n = state_dim;
     
     // Launch kernels to construct matrices
@@ -61,23 +61,14 @@ void cayley_transform_gpu(float* d_A_skew, float* d_A_orthogonal, int state_dim,
     // Copy I + S to A_orthogonal (will be overwritten by solution)
     CHECK_CUDA(cudaMemcpy(d_A_orthogonal, d_workspace_I_plus_S, n * n * sizeof(float), cudaMemcpyDeviceToDevice));
     
-    // Get workspace size for LU factorization
-    int workspace_size = 0;
-    CHECK_CUSOLVER(cusolverDnSgetrf_bufferSize(cusolver_handle, n, n, d_workspace_I_minus_S, n, &workspace_size));
-    
-    float* d_workspace;
-    CHECK_CUDA(cudaMalloc(&d_workspace, workspace_size * sizeof(float)));
-    
-    // LU factorization of I - S
+    // LU factorization of I - S using pre-allocated workspace
     CHECK_CUSOLVER(cusolverDnSgetrf(cusolver_handle, n, n, d_workspace_I_minus_S, n, 
-                                   d_workspace, d_workspace_ipiv, d_workspace_info));
+                                   d_cusolver_workspace, d_workspace_ipiv, d_workspace_info));
     
     // Solve (I - S) * A_orthogonal = (I + S)
     CHECK_CUSOLVER(cusolverDnSgetrs(cusolver_handle, CUBLAS_OP_N, n, n, 
                                    d_workspace_I_minus_S, n, d_workspace_ipiv, 
                                    d_A_orthogonal, n, d_workspace_info));
-    
-    CHECK_CUDA(cudaFree(d_workspace));
 }
 
 // Initialize the state space model
@@ -170,7 +161,13 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&ssm->d_workspace_I_plus_S, state_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_workspace_I_minus_S, state_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_workspace_ipiv, state_dim * sizeof(int)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_workspace_info, sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_workspace_info, sizeof(int)));
+    
+    // Allocate cuSolver workspace for LU factorization
+    int cusolver_workspace_size = 0;
+    CHECK_CUSOLVER(cusolverDnSgetrf_bufferSize(ssm->cusolver_handle, state_dim, state_dim, 
+                                              ssm->d_workspace_I_minus_S, state_dim, &cusolver_workspace_size));
+    CHECK_CUDA(cudaMalloc(&ssm->d_cusolver_workspace, cusolver_workspace_size * sizeof(float)));
     
     // Copy initialized matrices to device
     CHECK_CUDA(cudaMemcpy(ssm->d_A_skew, A_skew, skew_params * sizeof(float), cudaMemcpyHostToDevice));
@@ -191,7 +188,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     // Compute initial orthogonal A matrix using Cayley transform
     cayley_transform_gpu(ssm->d_A_skew, ssm->d_A_orthogonal, state_dim, 
                         ssm->cusolver_handle, ssm->d_workspace_S, ssm->d_workspace_I_plus_S, 
-                        ssm->d_workspace_I_minus_S, ssm->d_workspace_ipiv, ssm->d_workspace_info);
+                        ssm->d_workspace_I_minus_S, ssm->d_workspace_ipiv, ssm->d_workspace_info, ssm->d_cusolver_workspace);
     
     // Free host memory
     free(A_skew);
@@ -215,7 +212,7 @@ void free_ssm(SSM* ssm) {
     // Free workspace memory
     cudaFree(ssm->d_workspace_S); cudaFree(ssm->d_workspace_I_plus_S); 
     cudaFree(ssm->d_workspace_I_minus_S); cudaFree(ssm->d_workspace_ipiv); 
-    cudaFree(ssm->d_workspace_info);
+    cudaFree(ssm->d_workspace_info); cudaFree(ssm->d_cusolver_workspace);
     
     // Destroy cuBLAS and cuSOLVER handles
     cublasDestroy(ssm->cublas_handle);
@@ -265,7 +262,7 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
     // Recompute A_orthogonal from A_skew at each forward pass
     cayley_transform_gpu(ssm->d_A_skew, ssm->d_A_orthogonal, ssm->state_dim, 
                         ssm->cusolver_handle, ssm->d_workspace_S, ssm->d_workspace_I_plus_S, 
-                        ssm->d_workspace_I_minus_S, ssm->d_workspace_ipiv, ssm->d_workspace_info);
+                        ssm->d_workspace_I_minus_S, ssm->d_workspace_ipiv, ssm->d_workspace_info, ssm->d_cusolver_workspace);
     
     // Get pointers to current timestep state
     float* d_h_prev = (timestep > 0) ? ssm->d_states + (timestep - 1) * ssm->batch_size * ssm->state_dim : NULL;
@@ -312,8 +309,6 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                             ssm->output_dim, ssm->batch_size, ssm->input_dim,
                             &alpha, ssm->d_D, ssm->input_dim,
                             d_X_t, ssm->input_dim,
-                            &beta_add, d_y_t, ssm->output_dim));
-}
                             &beta_add, d_y_t, ssm->output_dim));
 }
 
@@ -605,7 +600,7 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     // Recompute A_orthogonal from loaded A_skew
     cayley_transform_gpu(ssm->d_A_skew, ssm->d_A_orthogonal, state_dim, 
                         ssm->cusolver_handle, ssm->d_workspace_S, ssm->d_workspace_I_plus_S, 
-                        ssm->d_workspace_I_minus_S, ssm->d_workspace_ipiv, ssm->d_workspace_info);
+                        ssm->d_workspace_I_minus_S, ssm->d_workspace_ipiv, ssm->d_workspace_info, ssm->d_cusolver_workspace);
     
     // Load Adam state
     float* A_skew_m = (float*)malloc(skew_params * sizeof(float));

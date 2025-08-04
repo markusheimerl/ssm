@@ -85,7 +85,8 @@ typedef struct {
     float* d_workspace_I_minus_S;  // n x n matrix
     float* d_workspace_S;          // n x n matrix
     int* d_workspace_ipiv;         // n pivot array
-    float* d_workspace_info;       // info output
+    int* d_workspace_info;         // info output (changed from float* to int*)
+    float* d_cusolver_workspace;   // cuSolver workspace for LU factorization
     
     // Dimensions
     int input_dim;
@@ -105,7 +106,7 @@ __global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, fl
 void cayley_transform_gpu(float* d_A_skew, float* d_A_orthogonal, int state_dim, 
                          cusolverDnHandle_t cusolver_handle, 
                          float* d_workspace_S, float* d_workspace_I_plus_S, float* d_workspace_I_minus_S,
-                         int* d_workspace_ipiv, float* d_workspace_info);
+                         int* d_workspace_ipiv, int* d_workspace_info, float* d_cusolver_workspace);
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
 void free_ssm(SSM* ssm);
 void reset_state_ssm(SSM* ssm);
