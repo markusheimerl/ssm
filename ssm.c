@@ -5,7 +5,7 @@
 // Using simplified analytical approximation for efficiency
 void compute_A_skew_gradients(float* A_skew, float* A_orthogonal_grad, float* A_skew_grad, int state_dim) {
     int n = state_dim;
-    int skew_params = n * (n - 1) / 2;
+    (void)A_skew; // Suppress unused parameter warning
     
     // Simplified approximation: assume dA_orthogonal/dA_skew ≈ scale * I
     // This is not exact but provides a reasonable approximation that's much faster
@@ -29,7 +29,6 @@ void compute_A_skew_gradients(float* A_skew, float* A_orthogonal_grad, float* A_
 // A_skew contains n(n-1)/2 parameters for upper triangular part of S
 void cayley_transform(float* A_skew, float* A_orthogonal, int state_dim) {
     int n = state_dim;
-    int skew_params = n * (n - 1) / 2;
     
     // Allocate temporary matrices
     float* S = (float*)calloc(n * n, sizeof(float));
