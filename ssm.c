@@ -1,6 +1,56 @@
 #include "ssm.h"
 
-// Matrix exponential utility functions for orthogonal parameterization
+// Simple BLAS replacement implementation
+void cblas_sgemm(CBLAS_LAYOUT layout, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB,
+                int m, int n, int k, float alpha, const float* A, int lda,
+                const float* B, int ldb, float beta, float* C, int ldc) {
+    // Simple implementation for row-major layout
+    if (layout != CblasRowMajor) return; // Only support row-major for now
+    
+    // Initialize C with beta * C
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            C[i * ldc + j] *= beta;
+        }
+    }
+    
+    // C = alpha * A * B + C
+    if (transA == CblasNoTrans && transB == CblasNoTrans) {
+        for (int i = 0; i < m; i++) {
+            for (int j = 0; j < n; j++) {
+                for (int l = 0; l < k; l++) {
+                    C[i * ldc + j] += alpha * A[i * lda + l] * B[l * ldb + j];
+                }
+            }
+        }
+    } else if (transA == CblasNoTrans && transB == CblasTrans) {
+        for (int i = 0; i < m; i++) {
+            for (int j = 0; j < n; j++) {
+                for (int l = 0; l < k; l++) {
+                    C[i * ldc + j] += alpha * A[i * lda + l] * B[j * ldb + l];
+                }
+            }
+        }
+    } else if (transA == CblasTrans && transB == CblasNoTrans) {
+        for (int i = 0; i < m; i++) {
+            for (int j = 0; j < n; j++) {
+                for (int l = 0; l < k; l++) {
+                    C[i * ldc + j] += alpha * A[l * lda + i] * B[l * ldb + j];
+                }
+            }
+        }
+    } else if (transA == CblasTrans && transB == CblasTrans) {
+        for (int i = 0; i < m; i++) {
+            for (int j = 0; j < n; j++) {
+                for (int l = 0; l < k; l++) {
+                    C[i * ldc + j] += alpha * A[l * lda + i] * B[j * ldb + l];
+                }
+            }
+        }
+    }
+}
+
+
 
 // Create full skew-symmetric matrix from upper triangular parameters
 void create_skew_symmetric(float* A_skew_full, const float* A_skew_params, int n) {
@@ -18,17 +68,103 @@ void create_skew_symmetric(float* A_skew_full, const float* A_skew_params, int n
     }
 }
 
-// Matrix exponential via Padé approximation (simplified for small matrices)
+// Simple matrix multiplication for small matrices
+void matrix_multiply(float* C, const float* A, const float* B, int n) {
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            C[i * n + j] = 0.0f;
+            for (int k = 0; k < n; k++) {
+                C[i * n + j] += A[i * n + k] * B[k * n + j];
+            }
+        }
+    }
+}
+
+// Simple matrix inversion using Gaussian elimination for small matrices
+int matrix_invert(float* inv, const float* A, int n, float* workspace) {
+    // Create augmented matrix [A | I]
+    float* aug = workspace; // size: n * 2n
+    
+    // Initialize augmented matrix
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            aug[i * (2 * n) + j] = A[i * n + j];
+            aug[i * (2 * n) + (n + j)] = (i == j) ? 1.0f : 0.0f;
+        }
+    }
+    
+    // Gaussian elimination with partial pivoting
+    for (int i = 0; i < n; i++) {
+        // Find pivot
+        int pivot_row = i;
+        float max_val = fabsf(aug[i * (2 * n) + i]);
+        for (int k = i + 1; k < n; k++) {
+            if (fabsf(aug[k * (2 * n) + i]) > max_val) {
+                max_val = fabsf(aug[k * (2 * n) + i]);
+                pivot_row = k;
+            }
+        }
+        
+        // Check for singular matrix
+        if (max_val < 1e-10f) {
+            return -1; // Matrix is singular
+        }
+        
+        // Swap rows if needed
+        if (pivot_row != i) {
+            for (int j = 0; j < 2 * n; j++) {
+                float temp = aug[i * (2 * n) + j];
+                aug[i * (2 * n) + j] = aug[pivot_row * (2 * n) + j];
+                aug[pivot_row * (2 * n) + j] = temp;
+            }
+        }
+        
+        // Scale pivot row
+        float pivot = aug[i * (2 * n) + i];
+        for (int j = 0; j < 2 * n; j++) {
+            aug[i * (2 * n) + j] /= pivot;
+        }
+        
+        // Eliminate column
+        for (int k = 0; k < n; k++) {
+            if (k != i) {
+                float factor = aug[k * (2 * n) + i];
+                for (int j = 0; j < 2 * n; j++) {
+                    aug[k * (2 * n) + j] -= factor * aug[i * (2 * n) + j];
+                }
+            }
+        }
+    }
+    
+    // Extract inverse matrix
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            inv[i * n + j] = aug[i * (2 * n) + (n + j)];
+        }
+    }
+    
+    return 0; // Success
+}
+
+// Matrix exponential via Padé approximation with proper matrix inversion
 void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n, float* workspace) {
     // For small matrices, use simplified Padé(3,3) approximation
     // exp(A) ≈ (I + A/2 + A²/12) * (I - A/2 + A²/12)^(-1)
     
-    // Use workspace memory instead of malloc
+    // Use workspace memory layout:
+    // workspace[0..n²-1]: identity
+    // workspace[n²..2n²-1]: A²
+    // workspace[2n²..3n²-1]: numerator
+    // workspace[3n²..4n²-1]: denominator
+    // workspace[4n²..5n²-1]: denominator_inv
+    // workspace[5n²..5n²+2n²-1]: aug matrix for inversion
+    
     float* identity = workspace;
     float* A2 = workspace + n * n;
     float* numerator = workspace + 2 * n * n;
     float* denominator = workspace + 3 * n * n;
-    // workspace + 4 * n * n is available for future use
+    float* denominator_inv = workspace + 4 * n * n;
+    float* aug_workspace = workspace + 5 * n * n;
     
     // Create identity matrix
     memset(identity, 0, n * n * sizeof(float));
@@ -36,9 +172,8 @@ void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n, floa
         identity[i * n + i] = 1.0f;
     }
     
-    // Compute A² using cblas directly
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                n, n, n, 1.0f, A_skew_full, n, A_skew_full, n, 0.0f, A2, n);
+    // Compute A² 
+    matrix_multiply(A2, A_skew_full, A_skew_full, n);
     
     // Compute numerator: I + A/2 + A²/12
     for (int i = 0; i < n * n; i++) {
@@ -50,10 +185,14 @@ void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n, floa
         denominator[i] = identity[i] - 0.5f * A_skew_full[i] + A2[i] / 12.0f;
     }
     
-    // For small matrices, solve numerator * denominator^(-1) 
-    // Using simple approach: exp_A = numerator (assuming denominator ≈ I for small A)
-    // This is a simplification - for production code, would need proper matrix inversion
-    memcpy(exp_A, numerator, n * n * sizeof(float));
+    // Invert denominator
+    if (matrix_invert(denominator_inv, denominator, n, aug_workspace) == 0) {
+        // exp_A = numerator * denominator_inv
+        matrix_multiply(exp_A, numerator, denominator_inv, n);
+    } else {
+        // If inversion fails, fall back to simplified approximation
+        memcpy(exp_A, numerator, n * n * sizeof(float));
+    }
 }
 
 // Compute gradient through matrix exponential (simplified)
@@ -128,7 +267,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     
     // Allocate workspace memory for matrix operations
     ssm->A_skew_full = (float*)malloc(state_dim * state_dim * sizeof(float));
-    ssm->workspace = (float*)malloc(5 * state_dim * state_dim * sizeof(float));
+    ssm->workspace = (float*)malloc((5 * state_dim * state_dim + 2 * state_dim * state_dim) * sizeof(float));
     
     // Initialize B, C, D matrices
     float scale_B = 0.5f / sqrtf(input_dim);

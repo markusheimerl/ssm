@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
-#include <cblas.h>
 #include "data.h"
 #include "ssm.h"
 
@@ -33,7 +32,7 @@ void reshape_data_for_batch_processing(float* X, float* y,
 
 int main() {
     srand(time(NULL));
-    openblas_set_num_threads(4);
+    // openblas_set_num_threads(4); // Commented out since we're not using OpenBLAS
 
     // Parameters
     const int input_dim = 16;

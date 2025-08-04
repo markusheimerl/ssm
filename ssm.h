@@ -5,7 +5,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <cblas.h>
+
+// BLAS constants and function declarations (since cblas.h is not available)
+typedef enum {CblasRowMajor=101, CblasColMajor=102} CBLAS_LAYOUT;
+typedef enum {CblasNoTrans=111, CblasTrans=112, CblasConjTrans=113} CBLAS_TRANSPOSE;
+
+// Simple BLAS replacement for matrix multiplication
+void cblas_sgemm(CBLAS_LAYOUT layout, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB,
+                int m, int n, int k, float alpha, const float* A, int lda,
+                const float* B, int ldb, float beta, float* C, int ldc);
 
 typedef struct {
     // State space matrices

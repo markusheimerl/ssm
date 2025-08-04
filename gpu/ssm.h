@@ -42,6 +42,7 @@ typedef struct {
     
     // Device pointers for gradients
     float* d_A_skew_grad; // state_dim*(state_dim-1)/2
+    float* d_A_orthogonal_grad; // state_dim x state_dim (workspace for gradient computation)
     float* d_B_grad;      // state_dim x input_dim
     float* d_C_grad;      // output_dim x state_dim
     float* d_D_grad;      // output_dim x input_dim

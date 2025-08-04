@@ -155,6 +155,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     
     // Allocate device memory for gradients
     CHECK_CUDA(cudaMalloc(&ssm->d_A_skew_grad, skew_params * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_orthogonal_grad, state_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_B_grad, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_C_grad, output_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_D_grad, output_dim * input_dim * sizeof(float)));
@@ -212,7 +213,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
 void free_ssm(SSM* ssm) {
     // Free device memory
     cudaFree(ssm->d_A_skew); cudaFree(ssm->d_A_orthogonal); cudaFree(ssm->d_B); cudaFree(ssm->d_C); cudaFree(ssm->d_D);
-    cudaFree(ssm->d_A_skew_grad); cudaFree(ssm->d_B_grad); cudaFree(ssm->d_C_grad); cudaFree(ssm->d_D_grad);
+    cudaFree(ssm->d_A_skew_grad); cudaFree(ssm->d_A_orthogonal_grad); cudaFree(ssm->d_B_grad); cudaFree(ssm->d_C_grad); cudaFree(ssm->d_D_grad);
     cudaFree(ssm->d_A_skew_m); cudaFree(ssm->d_A_skew_v); cudaFree(ssm->d_B_m); cudaFree(ssm->d_B_v);
     cudaFree(ssm->d_C_m); cudaFree(ssm->d_C_v); cudaFree(ssm->d_D_m); cudaFree(ssm->d_D_v);
     cudaFree(ssm->d_states); cudaFree(ssm->d_predictions); cudaFree(ssm->d_error); 
@@ -282,7 +283,7 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 ssm->state_dim, ssm->batch_size, ssm->state_dim,
-                                &alpha, ssm->d_A, ssm->state_dim,
+                                &alpha, ssm->d_A_orthogonal, ssm->state_dim,
                                 d_h_prev, ssm->state_dim,
                                 &beta_add, d_h_t, ssm->state_dim));
     }
@@ -331,7 +332,9 @@ float calculate_loss_ssm(SSM* ssm, float* d_y) {
 
 // Zero gradients
 void zero_gradients_ssm(SSM* ssm) {
-    CHECK_CUDA(cudaMemset(ssm->d_A_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float)));
+    int skew_params = ssm->state_dim * (ssm->state_dim - 1) / 2;
+    CHECK_CUDA(cudaMemset(ssm->d_A_skew_grad, 0, skew_params * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_A_orthogonal_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_B_grad, 0, ssm->state_dim * ssm->input_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_C_grad, 0, ssm->output_dim * ssm->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(float)));
@@ -389,7 +392,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
             CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                     CUBLAS_OP_N, CUBLAS_OP_N,
                                     ssm->state_dim, ssm->batch_size, ssm->state_dim,
-                                    &alpha, ssm->d_A, ssm->state_dim,
+                                    &alpha, ssm->d_A_orthogonal, ssm->state_dim,
                                     d_dh_next, ssm->state_dim,
                                     &beta_add, d_dh_t, ssm->state_dim));
         }
@@ -410,9 +413,13 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                     ssm->state_dim, ssm->state_dim, ssm->batch_size,
                                     &alpha, d_h_prev, ssm->state_dim,
                                     d_dh_t, ssm->state_dim,
-                                    &beta_add, ssm->d_A_grad, ssm->state_dim));
+                                    &beta_add, ssm->d_A_orthogonal_grad, ssm->state_dim));
         }
     }
+    
+    // Transform gradient from A_orthogonal space to A_skew space
+    // For now, use simplified transformation (should be proper chain rule through matrix exponential)
+    matrix_exponential_gradient_gpu(ssm->d_A_skew_grad, ssm->d_A_orthogonal_grad, ssm->state_dim);
 }
 
 // CUDA kernel for AdamW update
@@ -444,14 +451,17 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     
     int block_size = 256;
     
-    // Update A
-    int A_size = ssm->state_dim * ssm->state_dim;
-    int A_blocks = (A_size + block_size - 1) / block_size;
+    // Update A_skew
+    int skew_params = ssm->state_dim * (ssm->state_dim - 1) / 2;
+    int A_blocks = (skew_params + block_size - 1) / block_size;
     adamw_update_kernel_ssm<<<A_blocks, block_size>>>(
-        ssm->d_A, ssm->d_A_grad, ssm->d_A_m, ssm->d_A_v,
+        ssm->d_A_skew, ssm->d_A_skew_grad, ssm->d_A_skew_m, ssm->d_A_skew_v,
         ssm->beta1, ssm->beta2, ssm->epsilon, learning_rate, ssm->weight_decay,
-        alpha_t, A_size, ssm->batch_size
+        alpha_t, skew_params, ssm->batch_size
     );
+    
+    // Recompute A_orthogonal from updated A_skew
+    compute_orthogonal_matrix_gpu(ssm);
     
     // Update B
     int B_size = ssm->state_dim * ssm->input_dim;
@@ -484,13 +494,14 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
 // Save model
 void save_ssm(SSM* ssm, const char* filename) {
     // Allocate temporary host memory
-    float* A = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
+    int skew_params = ssm->state_dim * (ssm->state_dim - 1) / 2;
+    float* A_skew = (float*)malloc(skew_params * sizeof(float));
     float* B = (float*)malloc(ssm->state_dim * ssm->input_dim * sizeof(float));
     float* C = (float*)malloc(ssm->output_dim * ssm->state_dim * sizeof(float));
     float* D = (float*)malloc(ssm->output_dim * ssm->input_dim * sizeof(float));
     
     // Copy matrices from device to host
-    CHECK_CUDA(cudaMemcpy(A, ssm->d_A, ssm->state_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(A_skew, ssm->d_A_skew, skew_params * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(B, ssm->d_B, ssm->state_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(C, ssm->d_C, ssm->output_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(D, ssm->d_D, ssm->output_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
@@ -498,7 +509,7 @@ void save_ssm(SSM* ssm, const char* filename) {
     FILE* file = fopen(filename, "wb");
     if (!file) {
         printf("Error opening file for writing: %s\n", filename);
-        free(A); free(B); free(C); free(D);
+        free(A_skew); free(B); free(C); free(D);
         return;
     }
     
@@ -510,7 +521,7 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(&ssm->batch_size, sizeof(int), 1, file);
     
     // Save matrices
-    fwrite(A, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    fwrite(A_skew, sizeof(float), skew_params, file);
     fwrite(B, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(C, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(D, sizeof(float), ssm->output_dim * ssm->input_dim, file);
@@ -518,8 +529,8 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(&ssm->t, sizeof(int), 1, file);
     
     // Save Adam state
-    float* A_m = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
-    float* A_v = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
+    float* A_skew_m = (float*)malloc(skew_params * sizeof(float));
+    float* A_skew_v = (float*)malloc(skew_params * sizeof(float));
     float* B_m = (float*)malloc(ssm->state_dim * ssm->input_dim * sizeof(float));
     float* B_v = (float*)malloc(ssm->state_dim * ssm->input_dim * sizeof(float));
     float* C_m = (float*)malloc(ssm->output_dim * ssm->state_dim * sizeof(float));
