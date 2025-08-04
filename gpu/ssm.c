@@ -59,48 +59,95 @@ __global__ void copy_matrix_kernel_ssm(float* dest, float* src, int size) {
         dest[idx] = src[idx];
     }
 }
-__global__ void build_orthogonal_kernel_ssm(float* A_orthogonal, float* rotation_angles, int state_dim) {
+// Initialize identity matrix kernel  
+__global__ void init_identity_kernel_ssm(float* matrix, int state_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_size = state_dim * state_dim;
     
     if (idx < total_size) {
         int i = idx / state_dim;
         int j = idx % state_dim;
-        
-        // Initialize to identity
+        matrix[idx] = (i == j) ? 1.0f : 0.0f;
+    }
+}
+
+// Parallel Givens rotation kernel - applies one rotation to all columns in parallel
+__global__ void apply_parallel_givens_kernel_ssm(float* matrix, int state_dim, int row_i, int row_j, float cos_theta, float sin_theta) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (k < state_dim) {
+        float a_ik = matrix[row_i * state_dim + k];
+        float a_jk = matrix[row_j * state_dim + k];
+        matrix[row_i * state_dim + k] = cos_theta * a_ik - sin_theta * a_jk;
+        matrix[row_j * state_dim + k] = sin_theta * a_ik + cos_theta * a_jk;
+    }
+}
+
+// Build orthogonal matrix from rotation angles (host function)
+// Optimized kernel that builds orthogonal matrix entirely on GPU
+__global__ void build_orthogonal_optimized_kernel_ssm(float* A_orthogonal, float* rotation_angles, int state_dim) {
+    extern __shared__ float sdata[];
+    
+    int total_size = state_dim * state_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Initialize to identity
+    if (idx < total_size) {
+        int i = idx / state_dim;
+        int j = idx % state_dim;
         A_orthogonal[idx] = (i == j) ? 1.0f : 0.0f;
     }
     
     __syncthreads();
     
-    // Apply Givens rotations (this needs to be done sequentially on GPU)
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        int angle_idx = 0;
-        for (int i = 1; i < state_dim; i++) {
-            for (int j = 0; j < i; j++) {
-                float theta = rotation_angles[angle_idx++];
-                float cos_theta = cosf(theta);
-                float sin_theta = sinf(theta);
-                
-                // Apply rotation to all columns
-                for (int k = 0; k < state_dim; k++) {
-                    float a_ik = A_orthogonal[i * state_dim + k];
-                    float a_jk = A_orthogonal[j * state_dim + k];
-                    A_orthogonal[i * state_dim + k] = cos_theta * a_ik - sin_theta * a_jk;
-                    A_orthogonal[j * state_dim + k] = sin_theta * a_ik + cos_theta * a_jk;
-                }
+    // Apply rotations - coordinate across all threads
+    int angle_idx = 0;
+    for (int rot_i = 1; rot_i < state_dim; rot_i++) {
+        for (int rot_j = 0; rot_j < rot_i; rot_j++) {
+            __syncthreads(); // Ensure previous rotation is complete
+            
+            // Load angle and compute cos/sin
+            float cos_theta, sin_theta;
+            if (threadIdx.x == 0 && blockIdx.x == 0) {
+                float theta = rotation_angles[angle_idx];
+                cos_theta = cosf(theta);
+                sin_theta = sinf(theta);
+                sdata[0] = cos_theta;
+                sdata[1] = sin_theta;
             }
+            
+            __syncthreads();
+            
+            // All threads read shared cos/sin values
+            cos_theta = sdata[0];
+            sin_theta = sdata[1];
+            
+            // Each thread handles one column
+            int k = threadIdx.x + blockIdx.x * blockDim.x;
+            if (k < state_dim) {
+                float a_ik = A_orthogonal[rot_i * state_dim + k];
+                float a_jk = A_orthogonal[rot_j * state_dim + k];
+                A_orthogonal[rot_i * state_dim + k] = cos_theta * a_ik - sin_theta * a_jk;
+                A_orthogonal[rot_j * state_dim + k] = sin_theta * a_ik + cos_theta * a_jk;
+            }
+            
+            if (threadIdx.x == 0 && blockIdx.x == 0) {
+                angle_idx++;
+            }
+            __syncthreads();
         }
     }
 }
 
-// Build orthogonal matrix from rotation angles (host function)
+// Build orthogonal matrix from rotation angles (host function) 
 void build_orthogonal_from_angles(SSM* ssm) {
+    int state_dim = ssm->state_dim;
     int block_size = 256;
-    int num_blocks = (ssm->state_dim * ssm->state_dim + block_size - 1) / block_size;
-    build_orthogonal_kernel_ssm<<<num_blocks, block_size>>>(
-        ssm->d_A_orthogonal, ssm->d_rotation_angles, ssm->state_dim
-    );
+    int num_blocks = (state_dim + block_size - 1) / block_size;
+    
+    // Use optimized kernel that runs entirely on GPU with shared memory for cos/sin
+    build_orthogonal_optimized_kernel_ssm<<<num_blocks, block_size, 2 * sizeof(float)>>>(
+        ssm->d_A_orthogonal, ssm->d_rotation_angles, state_dim);
     CHECK_CUDA(cudaDeviceSynchronize());
 }
 
@@ -361,55 +408,145 @@ void zero_gradients_ssm(SSM* ssm) {
     CHECK_CUDA(cudaMemset(ssm->d_D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(float)));
 }
 
+// Optimized kernel for computing all rotation gradients in parallel
+__global__ void compute_all_rotation_gradients_kernel_ssm(
+    float* rotation_grad, float* A_grad, float* A_temp, float* rotation_angles, 
+    int state_dim) {
+    
+    extern __shared__ float sdata[];
+    int num_angles = state_dim * (state_dim - 1) / 2;
+    int angle_idx = blockIdx.x;
+    
+    if (angle_idx >= num_angles) return;
+    
+    // Compute which rotation this angle corresponds to
+    int rot_i = 1, rot_j = 0;
+    int temp_idx = 0;
+    for (int i = 1; i < state_dim; i++) {
+        for (int j = 0; j < i; j++) {
+            if (temp_idx == angle_idx) {
+                rot_i = i;
+                rot_j = j;
+                goto found_rotation;
+            }
+            temp_idx++;
+        }
+    }
+    
+    found_rotation:
+    
+    float theta = rotation_angles[angle_idx];
+    float cos_theta = cosf(theta);
+    float sin_theta = sinf(theta);
+    
+    // Compute gradient contribution for this angle across all columns in parallel
+    float grad_theta_total = 0.0f;
+    
+    for (int k = threadIdx.x; k < state_dim; k += blockDim.x) {
+        float grad_i_k = A_grad[rot_i * state_dim + k];
+        float grad_j_k = A_grad[rot_j * state_dim + k];
+        float a_i_k = A_temp[rot_i * state_dim + k];
+        float a_j_k = A_temp[rot_j * state_dim + k];
+        
+        // ∂/∂θ (cos(θ) * a_ik - sin(θ) * a_jk) = -sin(θ) * a_ik - cos(θ) * a_jk
+        // ∂/∂θ (sin(θ) * a_ik + cos(θ) * a_jk) = cos(θ) * a_ik - sin(θ) * a_jk
+        float grad_theta_contrib = grad_i_k * (-sin_theta * a_i_k - cos_theta * a_j_k) +
+                                   grad_j_k * (cos_theta * a_i_k - sin_theta * a_j_k);
+        grad_theta_total += grad_theta_contrib;
+    }
+    
+    // Reduce across threads in this block
+    sdata[threadIdx.x] = grad_theta_total;
+    __syncthreads();
+    
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    
+    if (threadIdx.x == 0) {
+        rotation_grad[angle_idx] = sdata[0];
+    }
+}
+
+// Optimized kernel for applying transpose rotations without host-device transfers
+__global__ void apply_all_transpose_rotations_kernel_ssm(
+    float* A_grad, float* A_temp, float* rotation_angles, int state_dim) {
+    
+    int num_angles = state_dim * (state_dim - 1) / 2;
+    
+    // Process rotations in reverse order
+    for (int angle_idx = num_angles - 1; angle_idx >= 0; angle_idx--) {
+        // Compute which rotation this angle corresponds to
+        int rot_i = 1, rot_j = 0;
+        int temp_idx = 0;
+        for (int i = 1; i < state_dim; i++) {
+            for (int j = 0; j < i; j++) {
+                if (temp_idx == angle_idx) {
+                    rot_i = i;
+                    rot_j = j;
+                    goto found_rotation;
+                }
+                temp_idx++;
+            }
+        }
+        
+        found_rotation:
+        
+        float theta = rotation_angles[angle_idx];
+        float cos_theta = cosf(theta);
+        float sin_theta = sinf(theta);
+        
+        __syncthreads(); // Ensure all threads have the same rotation parameters
+        
+        // Apply transpose rotation to gradients
+        int k = threadIdx.x + blockIdx.x * blockDim.x;
+        if (k < state_dim) {
+            float grad_i_k = A_grad[rot_i * state_dim + k];
+            float grad_j_k = A_grad[rot_j * state_dim + k];
+            
+            A_grad[rot_i * state_dim + k] = cos_theta * grad_i_k + sin_theta * grad_j_k;
+            A_grad[rot_j * state_dim + k] = -sin_theta * grad_i_k + cos_theta * grad_j_k;
+            
+            // Apply to temporary matrix too
+            float a_i_k = A_temp[rot_i * state_dim + k];
+            float a_j_k = A_temp[rot_j * state_dim + k];
+            A_temp[rot_i * state_dim + k] = cos_theta * a_i_k - sin_theta * a_j_k;
+            A_temp[rot_j * state_dim + k] = sin_theta * a_i_k + cos_theta * a_j_k;
+        }
+        
+        __syncthreads(); // Ensure rotation is complete before next iteration
+    }
+}
+
 // Compute gradients of rotation angles from gradients of orthogonal matrix (GPU version)
 void compute_rotation_gradients_gpu(SSM* ssm, float* d_A_orthogonal_grad) {
     int n = ssm->state_dim;
     int num_angles = n * (n - 1) / 2;
     
-    // Use pre-allocated GPU buffers instead of malloc
     // Copy current orthogonal matrix to temporary buffer
     int total_size = n * n;
-    dim3 block(256);
-    dim3 grid((total_size + block.x - 1) / block.x);
-    
-    copy_matrix_kernel_ssm<<<grid, block>>>(ssm->d_A_temp, ssm->d_A_orthogonal, total_size);
-    CHECK_CUDA(cudaDeviceSynchronize());
+    dim3 copy_block(256);
+    dim3 copy_grid((total_size + copy_block.x - 1) / copy_block.x);
+    copy_matrix_kernel_ssm<<<copy_grid, copy_block>>>(ssm->d_A_temp, ssm->d_A_orthogonal, total_size);
     
     // Initialize rotation angle gradients to zero
     CHECK_CUDA(cudaMemset(ssm->d_rotation_angles_grad, 0, num_angles * sizeof(float)));
     
-    // Apply chain rule through each Givens rotation in reverse order
-    int angle_idx = num_angles - 1;
-    for (int i = n - 1; i >= 1; i--) {
-        for (int j = i - 1; j >= 0; j--) {
-            // Compute gradient for this rotation angle using GPU kernel
-            dim3 grad_block(256);
-            dim3 grad_grid((n + grad_block.x - 1) / grad_block.x);
-            
-            compute_single_rotation_gradient_kernel_ssm<<<grad_grid, grad_block>>>(
-                ssm->d_rotation_angles_grad, d_A_orthogonal_grad, ssm->d_A_temp,
-                ssm->d_rotation_angles, n, angle_idx, i, j);
-            CHECK_CUDA(cudaDeviceSynchronize());
-            
-            // Get rotation angle for transpose operations (small host-device copy is acceptable)
-            float theta;
-            CHECK_CUDA(cudaMemcpy(&theta, &ssm->d_rotation_angles[angle_idx], sizeof(float), cudaMemcpyDeviceToHost));
-            float cos_theta = cosf(theta);
-            float sin_theta = sinf(theta);
-            
-            // Apply transpose Givens rotation to gradients
-            apply_transpose_givens_to_grads_kernel_ssm<<<grad_grid, grad_block>>>(
-                d_A_orthogonal_grad, n, i, j, cos_theta, sin_theta);
-            CHECK_CUDA(cudaDeviceSynchronize());
-            
-            // Apply transpose Givens rotation to temporary matrix
-            apply_givens_rotation_kernel_ssm<<<grad_grid, grad_block>>>(
-                ssm->d_A_temp, n, i, j, cos_theta, sin_theta);
-            CHECK_CUDA(cudaDeviceSynchronize());
-            
-            angle_idx--;
-        }
-    }
+    // Compute all rotation gradients in parallel - one block per angle
+    int block_size = 256;
+    compute_all_rotation_gradients_kernel_ssm<<<num_angles, block_size, block_size * sizeof(float)>>>(
+        ssm->d_rotation_angles_grad, d_A_orthogonal_grad, ssm->d_A_temp, ssm->d_rotation_angles, n);
+    
+    // Apply all transpose rotations in sequence but without host-device transfers
+    dim3 transpose_block(256);
+    dim3 transpose_grid((n + transpose_block.x - 1) / transpose_block.x);
+    apply_all_transpose_rotations_kernel_ssm<<<transpose_grid, transpose_block>>>(
+        d_A_orthogonal_grad, ssm->d_A_temp, ssm->d_rotation_angles, n);
+    
+    CHECK_CUDA(cudaDeviceSynchronize());
 }
 // Backward pass
 void backward_pass_ssm(SSM* ssm, float* d_X) {
