@@ -41,6 +41,12 @@ typedef struct {
     float* state_error;    // seq_len x batch_size x state_dim
     float* state_outputs;  // seq_len x batch_size x state_dim
     
+    // Pre-allocated workspace for Cayley transform (to avoid malloc/free in forward/backward)
+    float* workspace_S;         // state_dim x state_dim matrix
+    float* workspace_I_plus_S;  // state_dim x state_dim matrix  
+    float* workspace_I_minus_S; // state_dim x state_dim matrix
+    int* workspace_ipiv;        // state_dim pivot array
+    
     // Dimensions
     int input_dim;
     int state_dim;
@@ -50,7 +56,8 @@ typedef struct {
 } SSM;
 
 // Function prototypes
-void cayley_transform(float* A_skew, float* A_orthogonal, int state_dim);
+void cayley_transform(float* A_skew, float* A_orthogonal, int state_dim,
+                     float* workspace_S, float* workspace_I_plus_S, float* workspace_I_minus_S, int* workspace_ipiv);
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
 void free_ssm(SSM* ssm);
 void reset_state_ssm(SSM* ssm);

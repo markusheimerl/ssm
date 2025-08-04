@@ -27,13 +27,18 @@ void compute_A_skew_gradients(float* A_skew, float* A_orthogonal_grad, float* A_
 
 // Cayley transform: A = (I + S)(I - S)^(-1) where S is skew-symmetric
 // A_skew contains n(n-1)/2 parameters for upper triangular part of S
-void cayley_transform(float* A_skew, float* A_orthogonal, int state_dim) {
+void cayley_transform(float* A_skew, float* A_orthogonal, int state_dim,
+                     float* workspace_S, float* workspace_I_plus_S, float* workspace_I_minus_S, int* workspace_ipiv) {
     int n = state_dim;
     
-    // Allocate temporary matrices
-    float* S = (float*)calloc(n * n, sizeof(float));
-    float* I_plus_S = (float*)malloc(n * n * sizeof(float));
-    float* I_minus_S = (float*)malloc(n * n * sizeof(float));
+    // Use pre-allocated workspace instead of malloc
+    float* S = workspace_S;
+    float* I_plus_S = workspace_I_plus_S;
+    float* I_minus_S = workspace_I_minus_S;
+    int* ipiv = workspace_ipiv;
+    
+    // Clear S matrix
+    memset(S, 0, n * n * sizeof(float));
     
     // Construct skew-symmetric matrix S from A_skew parameters
     int param_idx = 0;
@@ -59,7 +64,6 @@ void cayley_transform(float* A_skew, float* A_orthogonal, int state_dim) {
     
     // Solve (I - S) * A_orthogonal = (I + S) using LAPACK SGESV
     // This computes A_orthogonal = (I - S)^(-1) * (I + S) = (I + S)(I - S)^(-1)
-    int* ipiv = (int*)malloc(n * sizeof(int));
     int info;
     
     // Copy I_plus_S to A_orthogonal (SGESV will overwrite the RHS)
@@ -77,11 +81,7 @@ void cayley_transform(float* A_skew, float* A_orthogonal, int state_dim) {
         }
     }
     
-    // Clean up
-    free(S);
-    free(I_plus_S);
-    free(I_minus_S);
-    free(ipiv);
+    // No cleanup needed - using pre-allocated workspace
 }
 
 // Initialize the state space model
@@ -135,6 +135,12 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->state_error = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     ssm->state_outputs = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     
+    // Allocate workspace for Cayley transform (pre-allocated to avoid malloc/free in forward/backward)
+    ssm->workspace_S = (float*)malloc(state_dim * state_dim * sizeof(float));
+    ssm->workspace_I_plus_S = (float*)malloc(state_dim * state_dim * sizeof(float));
+    ssm->workspace_I_minus_S = (float*)malloc(state_dim * state_dim * sizeof(float));
+    ssm->workspace_ipiv = (int*)malloc(state_dim * sizeof(int));
+    
     // Initialize B, C, D matrices
     float scale_B = 0.5f / sqrtf(input_dim);
     float scale_C = 0.5f / sqrtf(state_dim);
@@ -159,7 +165,8 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     }
     
     // Compute initial orthogonal A matrix using Cayley transform
-    cayley_transform(ssm->A_skew, ssm->A_orthogonal, state_dim);
+    cayley_transform(ssm->A_skew, ssm->A_orthogonal, state_dim,
+                    ssm->workspace_S, ssm->workspace_I_plus_S, ssm->workspace_I_minus_S, ssm->workspace_ipiv);
     
     return ssm;
 }
@@ -172,6 +179,8 @@ void free_ssm(SSM* ssm) {
     free(ssm->C_m); free(ssm->C_v); free(ssm->D_m); free(ssm->D_v);
     free(ssm->states); free(ssm->predictions); free(ssm->error); free(ssm->state_error);
     free(ssm->state_outputs);
+    free(ssm->workspace_S); free(ssm->workspace_I_plus_S); free(ssm->workspace_I_minus_S);
+    free(ssm->workspace_ipiv);
     free(ssm);
 }
 
@@ -183,7 +192,8 @@ void reset_state_ssm(SSM* ssm) {
 // Forward pass
 void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
     // Recompute A_orthogonal from A_skew at each forward pass
-    cayley_transform(ssm->A_skew, ssm->A_orthogonal, ssm->state_dim);
+    cayley_transform(ssm->A_skew, ssm->A_orthogonal, ssm->state_dim,
+                    ssm->workspace_S, ssm->workspace_I_plus_S, ssm->workspace_I_minus_S, ssm->workspace_ipiv);
     
     // Get pointers to current timestep state
     float* h_prev = (timestep > 0) ? ssm->states + (timestep - 1) * ssm->batch_size * ssm->state_dim : NULL;
@@ -455,7 +465,8 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(ssm->D_v, sizeof(float), output_dim * input_dim, file);
     
     // Recompute A_orthogonal from loaded A_skew
-    cayley_transform(ssm->A_skew, ssm->A_orthogonal, state_dim);
+    cayley_transform(ssm->A_skew, ssm->A_orthogonal, state_dim,
+                    ssm->workspace_S, ssm->workspace_I_plus_S, ssm->workspace_I_minus_S, ssm->workspace_ipiv);
     
     fclose(file);
     printf("Model loaded from %s\n", filename);
