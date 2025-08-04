@@ -18,22 +18,17 @@ void create_skew_symmetric(float* A_skew_full, const float* A_skew_params, int n
     }
 }
 
-// Matrix multiplication: C = A * B (all n x n matrices)
-void matrix_multiply(float* C, const float* A, const float* B, int n) {
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                n, n, n, 1.0f, A, n, B, n, 0.0f, C, n);
-}
-
 // Matrix exponential via Padé approximation (simplified for small matrices)
-void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n) {
+void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n, float* workspace) {
     // For small matrices, use simplified Padé(3,3) approximation
     // exp(A) ≈ (I + A/2 + A²/12) * (I - A/2 + A²/12)^(-1)
     
-    float* identity = (float*)malloc(n * n * sizeof(float));
-    float* A2 = (float*)malloc(n * n * sizeof(float));
-    float* numerator = (float*)malloc(n * n * sizeof(float));
-    float* denominator = (float*)malloc(n * n * sizeof(float));
-    float* temp = (float*)malloc(n * n * sizeof(float));
+    // Use workspace memory instead of malloc
+    float* identity = workspace;
+    float* A2 = workspace + n * n;
+    float* numerator = workspace + 2 * n * n;
+    float* denominator = workspace + 3 * n * n;
+    // workspace + 4 * n * n is available for future use
     
     // Create identity matrix
     memset(identity, 0, n * n * sizeof(float));
@@ -41,8 +36,9 @@ void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n) {
         identity[i * n + i] = 1.0f;
     }
     
-    // Compute A²
-    matrix_multiply(A2, A_skew_full, A_skew_full, n);
+    // Compute A² using cblas directly
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                n, n, n, 1.0f, A_skew_full, n, A_skew_full, n, 0.0f, A2, n);
     
     // Compute numerator: I + A/2 + A²/12
     for (int i = 0; i < n * n; i++) {
@@ -58,8 +54,6 @@ void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n) {
     // Using simple approach: exp_A = numerator (assuming denominator ≈ I for small A)
     // This is a simplification - for production code, would need proper matrix inversion
     memcpy(exp_A, numerator, n * n * sizeof(float));
-    
-    free(identity); free(A2); free(numerator); free(denominator); free(temp);
 }
 
 // Compute gradient through matrix exponential (simplified)
@@ -132,6 +126,10 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->state_error = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     ssm->state_outputs = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     
+    // Allocate workspace memory for matrix operations
+    ssm->A_skew_full = (float*)malloc(state_dim * state_dim * sizeof(float));
+    ssm->workspace = (float*)malloc(5 * state_dim * state_dim * sizeof(float));
+    
     // Initialize B, C, D matrices
     float scale_B = 0.5f / sqrtf(input_dim);
     float scale_C = 0.5f / sqrtf(state_dim);
@@ -155,11 +153,9 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
         ssm->A_skew[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_A_skew;
     }
     
-    // Compute initial A_orthogonal from A_skew
-    float* A_skew_full = (float*)malloc(state_dim * state_dim * sizeof(float));
-    create_skew_symmetric(A_skew_full, ssm->A_skew, state_dim);
-    matrix_exponential_pade(ssm->A_orthogonal, A_skew_full, state_dim);
-    free(A_skew_full);
+    // Compute initial A_orthogonal from A_skew using pre-allocated workspace
+    create_skew_symmetric(ssm->A_skew_full, ssm->A_skew, state_dim);
+    matrix_exponential_pade(ssm->A_orthogonal, ssm->A_skew_full, state_dim, ssm->workspace);
     
     return ssm;
 }
@@ -172,6 +168,7 @@ void free_ssm(SSM* ssm) {
     free(ssm->C_m); free(ssm->C_v); free(ssm->D_m); free(ssm->D_v);
     free(ssm->states); free(ssm->predictions); free(ssm->error); free(ssm->state_error);
     free(ssm->state_outputs);
+    free(ssm->A_skew_full); free(ssm->workspace);
     free(ssm);
 }
 
@@ -182,11 +179,9 @@ void reset_state_ssm(SSM* ssm) {
 
 // Forward pass
 void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
-    // Recompute A_orthogonal from A_skew for this forward pass
-    float* A_skew_full = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
-    create_skew_symmetric(A_skew_full, ssm->A_skew, ssm->state_dim);
-    matrix_exponential_pade(ssm->A_orthogonal, A_skew_full, ssm->state_dim);
-    free(A_skew_full);
+    // Recompute A_orthogonal from A_skew using pre-allocated workspace
+    create_skew_symmetric(ssm->A_skew_full, ssm->A_skew, ssm->state_dim);
+    matrix_exponential_pade(ssm->A_orthogonal, ssm->A_skew_full, ssm->state_dim, ssm->workspace);
     
     // Get pointers to current timestep state
     float* h_prev = (timestep > 0) ? ssm->states + (timestep - 1) * ssm->batch_size * ssm->state_dim : NULL;
@@ -260,8 +255,10 @@ void backward_pass_ssm(SSM* ssm, float* X) {
     // Clear state errors
     memset(ssm->state_error, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float));
     
-    // Allocate temporary gradient matrix for A_orthogonal
-    float* A_orthogonal_grad = (float*)calloc(ssm->state_dim * ssm->state_dim, sizeof(float));
+    // Allocate temporary gradient matrix for A_orthogonal using workspace
+    // Use the second half of workspace for A_orthogonal_grad
+    float* A_orthogonal_grad = ssm->workspace + 2 * ssm->state_dim * ssm->state_dim;
+    memset(A_orthogonal_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float));
     
     for (int t = ssm->seq_len - 1; t >= 0; t--) {
         float* X_t = X + t * ssm->batch_size * ssm->input_dim;
@@ -327,13 +324,9 @@ void backward_pass_ssm(SSM* ssm, float* X) {
         }
     }
     
-    // Convert gradients from A_orthogonal to A_skew using matrix exponential gradient
-    float* A_skew_full = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
-    create_skew_symmetric(A_skew_full, ssm->A_skew, ssm->state_dim);
-    matrix_exponential_gradient(ssm->A_skew_grad, A_orthogonal_grad, A_skew_full, ssm->state_dim);
-    
-    free(A_skew_full);
-    free(A_orthogonal_grad);
+    // Convert gradients from A_orthogonal to A_skew using pre-allocated workspace
+    create_skew_symmetric(ssm->A_skew_full, ssm->A_skew, ssm->state_dim);
+    matrix_exponential_gradient(ssm->A_skew_grad, A_orthogonal_grad, ssm->A_skew_full, ssm->state_dim);
 }
 
 // Update weights using AdamW
@@ -460,11 +453,9 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(ssm->D_m, sizeof(float), output_dim * input_dim, file);
     fread(ssm->D_v, sizeof(float), output_dim * input_dim, file);
     
-    // Recompute A_orthogonal from loaded A_skew
-    float* A_skew_full = (float*)malloc(state_dim * state_dim * sizeof(float));
-    create_skew_symmetric(A_skew_full, ssm->A_skew, state_dim);
-    matrix_exponential_pade(ssm->A_orthogonal, A_skew_full, state_dim);
-    free(A_skew_full);
+    // Recompute A_orthogonal from loaded A_skew using pre-allocated workspace
+    create_skew_symmetric(ssm->A_skew_full, ssm->A_skew, state_dim);
+    matrix_exponential_pade(ssm->A_orthogonal, ssm->A_skew_full, state_dim, ssm->workspace);
     
     fclose(file);
     printf("Model loaded from %s\n", filename);

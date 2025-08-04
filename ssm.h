@@ -38,6 +38,10 @@ typedef struct {
     float* state_error;    // seq_len x batch_size x state_dim
     float* state_outputs;  // seq_len x batch_size x state_dim
     
+    // Workspace memory for matrix operations (to avoid malloc in forward/backward pass)
+    float* A_skew_full;     // state_dim x state_dim workspace
+    float* workspace;       // 5 * state_dim * state_dim workspace for matrix exponential
+    
     // Dimensions
     int input_dim;
     int state_dim;
@@ -48,8 +52,7 @@ typedef struct {
 
 // Function prototypes
 void create_skew_symmetric(float* A_skew_full, const float* A_skew_params, int n);
-void matrix_multiply(float* C, const float* A, const float* B, int n);
-void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n);
+void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n, float* workspace);
 void matrix_exponential_gradient(float* grad_A_skew, const float* grad_exp_A, 
                                 const float* A_skew_full, int n);
 
