@@ -1,57 +1,5 @@
 #include "ssm.h"
 
-// Simple BLAS replacement implementation
-void cblas_sgemm(CBLAS_LAYOUT layout, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB,
-                int m, int n, int k, float alpha, const float* A, int lda,
-                const float* B, int ldb, float beta, float* C, int ldc) {
-    // Simple implementation for row-major layout
-    if (layout != CblasRowMajor) return; // Only support row-major for now
-    
-    // Initialize C with beta * C
-    for (int i = 0; i < m; i++) {
-        for (int j = 0; j < n; j++) {
-            C[i * ldc + j] *= beta;
-        }
-    }
-    
-    // C = alpha * A * B + C
-    if (transA == CblasNoTrans && transB == CblasNoTrans) {
-        for (int i = 0; i < m; i++) {
-            for (int j = 0; j < n; j++) {
-                for (int l = 0; l < k; l++) {
-                    C[i * ldc + j] += alpha * A[i * lda + l] * B[l * ldb + j];
-                }
-            }
-        }
-    } else if (transA == CblasNoTrans && transB == CblasTrans) {
-        for (int i = 0; i < m; i++) {
-            for (int j = 0; j < n; j++) {
-                for (int l = 0; l < k; l++) {
-                    C[i * ldc + j] += alpha * A[i * lda + l] * B[j * ldb + l];
-                }
-            }
-        }
-    } else if (transA == CblasTrans && transB == CblasNoTrans) {
-        for (int i = 0; i < m; i++) {
-            for (int j = 0; j < n; j++) {
-                for (int l = 0; l < k; l++) {
-                    C[i * ldc + j] += alpha * A[l * lda + i] * B[l * ldb + j];
-                }
-            }
-        }
-    } else if (transA == CblasTrans && transB == CblasTrans) {
-        for (int i = 0; i < m; i++) {
-            for (int j = 0; j < n; j++) {
-                for (int l = 0; l < k; l++) {
-                    C[i * ldc + j] += alpha * A[l * lda + i] * B[j * ldb + l];
-                }
-            }
-        }
-    }
-}
-
-
-
 // Create full skew-symmetric matrix from upper triangular parameters
 void create_skew_symmetric(float* A_skew_full, const float* A_skew_params, int n) {
     // Initialize to zero
@@ -68,82 +16,21 @@ void create_skew_symmetric(float* A_skew_full, const float* A_skew_params, int n
     }
 }
 
-// Simple matrix multiplication for small matrices
-void matrix_multiply(float* C, const float* A, const float* B, int n) {
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            C[i * n + j] = 0.0f;
-            for (int k = 0; k < n; k++) {
-                C[i * n + j] += A[i * n + k] * B[k * n + j];
-            }
-        }
-    }
-}
+void sgetri_(int* n, float* a, int* lda, int* ipiv, float* work, int* lwork, int* info);
 
-// Simple matrix inversion using Gaussian elimination for small matrices
 int matrix_invert(float* inv, const float* A, int n, float* workspace) {
-    // Create augmented matrix [A | I]
-    float* aug = workspace; // size: n * 2n
+    int* ipiv = (int*)workspace;
+    float* work = workspace + n;
+    int lwork = n;
+
+    // Copy A to inv
+    memcpy(inv, A, n * n * sizeof(float));
+
+    // Call LAPACK function
+    int info;
+    sgetri_(&n, inv, &n, ipiv, work, &lwork, &info);
     
-    // Initialize augmented matrix
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            aug[i * (2 * n) + j] = A[i * n + j];
-            aug[i * (2 * n) + (n + j)] = (i == j) ? 1.0f : 0.0f;
-        }
-    }
-    
-    // Gaussian elimination with partial pivoting
-    for (int i = 0; i < n; i++) {
-        // Find pivot
-        int pivot_row = i;
-        float max_val = fabsf(aug[i * (2 * n) + i]);
-        for (int k = i + 1; k < n; k++) {
-            if (fabsf(aug[k * (2 * n) + i]) > max_val) {
-                max_val = fabsf(aug[k * (2 * n) + i]);
-                pivot_row = k;
-            }
-        }
-        
-        // Check for singular matrix
-        if (max_val < 1e-10f) {
-            return -1; // Matrix is singular
-        }
-        
-        // Swap rows if needed
-        if (pivot_row != i) {
-            for (int j = 0; j < 2 * n; j++) {
-                float temp = aug[i * (2 * n) + j];
-                aug[i * (2 * n) + j] = aug[pivot_row * (2 * n) + j];
-                aug[pivot_row * (2 * n) + j] = temp;
-            }
-        }
-        
-        // Scale pivot row
-        float pivot = aug[i * (2 * n) + i];
-        for (int j = 0; j < 2 * n; j++) {
-            aug[i * (2 * n) + j] /= pivot;
-        }
-        
-        // Eliminate column
-        for (int k = 0; k < n; k++) {
-            if (k != i) {
-                float factor = aug[k * (2 * n) + i];
-                for (int j = 0; j < 2 * n; j++) {
-                    aug[k * (2 * n) + j] -= factor * aug[i * (2 * n) + j];
-                }
-            }
-        }
-    }
-    
-    // Extract inverse matrix
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            inv[i * n + j] = aug[i * (2 * n) + (n + j)];
-        }
-    }
-    
-    return 0; // Success
+    return info;
 }
 
 // Matrix exponential via Padé approximation with proper matrix inversion
@@ -173,8 +60,12 @@ void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n, floa
     }
     
     // Compute A² 
-    matrix_multiply(A2, A_skew_full, A_skew_full, n);
-    
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+        n, n, n,
+        1.0f, A_skew_full, n,
+        A_skew_full, n,
+        0.0f, A2, n);
+
     // Compute numerator: I + A/2 + A²/12
     for (int i = 0; i < n * n; i++) {
         numerator[i] = identity[i] + 0.5f * A_skew_full[i] + A2[i] / 12.0f;
@@ -188,9 +79,14 @@ void matrix_exponential_pade(float* exp_A, const float* A_skew_full, int n, floa
     // Invert denominator
     if (matrix_invert(denominator_inv, denominator, n, aug_workspace) == 0) {
         // exp_A = numerator * denominator_inv
-        matrix_multiply(exp_A, numerator, denominator_inv, n);
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    n, n, n,
+                    1.0f, numerator, n,
+                    denominator_inv, n,
+                    0.0f, exp_A, n);
     } else {
         // If inversion fails, fall back to simplified approximation
+        printf("Matrix inversion failed, using simplified approximation.\n");
         memcpy(exp_A, numerator, n * n * sizeof(float));
     }
 }
