@@ -101,6 +101,76 @@ static void compute_A_from_blocks(SSM* ssm) {
     }
 }
 
+// Compute gradients with respect to skew parameters using analytical derivatives
+static void compute_skew_gradients(SSM* ssm) {
+    memset(ssm->A_skew_grad, 0, (ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2) * sizeof(float));
+    
+    float* skew_block = ssm->workspace;
+    float* exp_block = ssm->workspace + ssm->block_size * ssm->block_size;
+    float* pade_work = ssm->workspace + 2 * ssm->block_size * ssm->block_size;
+    float* grad_block = ssm->workspace + 8 * ssm->block_size * ssm->block_size;
+    float* temp1 = ssm->workspace + 9 * ssm->block_size * ssm->block_size;
+    float* temp2 = ssm->workspace + 10 * ssm->block_size * ssm->block_size;
+    float* E_ij = ssm->workspace + 11 * ssm->block_size * ssm->block_size;
+    
+    for (int block = 0; block < ssm->num_blocks; block++) {
+        int block_start = block * ssm->block_size;
+        const float* block_params = ssm->A_skew + block * (ssm->block_size * (ssm->block_size - 1) / 2);
+        float* block_grad_params = ssm->A_skew_grad + block * (ssm->block_size * (ssm->block_size - 1) / 2);
+        
+        // Extract gradient block from A_grad
+        for (int i = 0; i < ssm->block_size; i++) {
+            for (int j = 0; j < ssm->block_size; j++) {
+                int A_i = block_start + i;
+                int A_j = block_start + j;
+                if (A_i < ssm->state_dim && A_j < ssm->state_dim) {
+                    grad_block[i * ssm->block_size + j] = ssm->A_grad[A_i * ssm->state_dim + A_j];
+                } else {
+                    grad_block[i * ssm->block_size + j] = 0.0f;
+                }
+            }
+        }
+        
+        // Construct skew-symmetric matrix and compute exponential for this block
+        construct_skew_matrix(skew_block, block_params, ssm->block_size);
+        matrix_exp_pade(exp_block, skew_block, ssm->block_size, pade_work, ssm->ipiv);
+        
+        // Compute analytical gradients using Fréchet derivative
+        // For skew-symmetric matrices: d(exp(S))/ds_ij ≈ (exp(S) * E_ij + E_ij * exp(S)) / 2
+        int param_idx = 0;
+        for (int i = 0; i < ssm->block_size; i++) {
+            for (int j = i + 1; j < ssm->block_size; j++) {
+                // Create elementary skew-symmetric matrix E_ij
+                memset(E_ij, 0, ssm->block_size * ssm->block_size * sizeof(float));
+                E_ij[i * ssm->block_size + j] = 1.0f;
+                E_ij[j * ssm->block_size + i] = -1.0f;
+                
+                // temp1 = exp(S) * E_ij
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                            ssm->block_size, ssm->block_size, ssm->block_size,
+                            1.0f, exp_block, ssm->block_size, E_ij, ssm->block_size,
+                            0.0f, temp1, ssm->block_size);
+                
+                // temp2 = E_ij * exp(S)
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                            ssm->block_size, ssm->block_size, ssm->block_size,
+                            1.0f, E_ij, ssm->block_size, exp_block, ssm->block_size,
+                            0.0f, temp2, ssm->block_size);
+                
+                // Chain rule: ∂L/∂s_ij = trace(∂L/∂A * ∂A/∂s_ij)
+                float grad_sum = 0.0f;
+                for (int k = 0; k < ssm->block_size * ssm->block_size; k++) {
+                    float derivative = 0.5f * (temp1[k] + temp2[k]);
+                    grad_sum += grad_block[k] * derivative;
+                }
+                
+                block_grad_params[param_idx] = grad_sum;
+                param_idx++;
+            }
+        }
+    }
+}
+
 // Initialize the state space model
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size) {
     SSM* ssm = (SSM*)malloc(sizeof(SSM));
@@ -347,103 +417,7 @@ void backward_pass_ssm(SSM* ssm, float* X) {
     }
     
     // Compute gradients with respect to skew parameters
-    memset(ssm->A_skew_grad, 0, (ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2) * sizeof(float));
-    
-    float* skew_block = ssm->workspace;
-    float* exp_block = ssm->workspace + ssm->block_size * ssm->block_size;
-    float* pade_work = ssm->workspace + 2 * ssm->block_size * ssm->block_size;
-    float* grad_block = ssm->workspace + 8 * ssm->block_size * ssm->block_size;
-    
-    for (int block = 0; block < ssm->num_blocks; block++) {
-        int block_start = block * ssm->block_size;
-        const float* block_params = ssm->A_skew + block * (ssm->block_size * (ssm->block_size - 1) / 2);
-        float* block_grad_params = ssm->A_skew_grad + block * (ssm->block_size * (ssm->block_size - 1) / 2);
-        
-        // Extract gradient block from A_grad
-        for (int i = 0; i < ssm->block_size; i++) {
-            for (int j = 0; j < ssm->block_size; j++) {
-                int A_i = block_start + i;
-                int A_j = block_start + j;
-                if (A_i < ssm->state_dim && A_j < ssm->state_dim) {
-                    grad_block[i * ssm->block_size + j] = ssm->A_grad[A_i * ssm->state_dim + A_j];
-                } else {
-                    grad_block[i * ssm->block_size + j] = 0.0f;
-                }
-            }
-        }
-        
-        // Construct skew-symmetric matrix and compute exponential for this block
-        construct_skew_matrix(skew_block, block_params, ssm->block_size);
-        matrix_exp_pade(exp_block, skew_block, ssm->block_size, pade_work, ssm->ipiv);
-        
-        // Analytical gradient computation using Fréchet derivative
-        // For matrix exponential, the Fréchet derivative in direction E is:
-        // dexp(S)[E] = ∫₀¹ exp(tS) E exp((1-t)S) dt
-        // 
-        // For small ||S||, we can use the approximation:
-        // dexp(S)[E] ≈ E + (SE + ES)/2 + higher order terms
-        //
-        // Since we're dealing with skew-symmetric matrices (small norms by design),
-        // we use: dexp(S)/ds_ij ≈ (E_ij exp(S) + exp(S) E_ij) / 2
-        // where E_ij has 1 at (i,j), -1 at (j,i) for skew symmetry
-        
-        float* temp1 = ssm->workspace + 9 * ssm->block_size * ssm->block_size;
-        float* temp2 = ssm->workspace + 10 * ssm->block_size * ssm->block_size;
-        float* E_ij = ssm->workspace + 11 * ssm->block_size * ssm->block_size;
-        
-        int param_idx = 0;
-        for (int i = 0; i < ssm->block_size; i++) {
-            for (int j = i + 1; j < ssm->block_size; j++) {
-                // Create elementary skew-symmetric matrix E_ij
-                memset(E_ij, 0, ssm->block_size * ssm->block_size * sizeof(float));
-                E_ij[i * ssm->block_size + j] = 1.0f;
-                E_ij[j * ssm->block_size + i] = -1.0f;
-                
-                // Compute improved approximation for small skew matrices:
-                // dexp(S)/ds_ij ≈ E_ij + (S E_ij + E_ij S)/2 + (S E_ij + E_ij S) exp(S)/2
-                
-                // temp1 = S * E_ij
-                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                            ssm->block_size, ssm->block_size, ssm->block_size,
-                            1.0f, skew_block, ssm->block_size, E_ij, ssm->block_size,
-                            0.0f, temp1, ssm->block_size);
-                
-                // temp2 = E_ij * S
-                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                            ssm->block_size, ssm->block_size, ssm->block_size,
-                            1.0f, E_ij, ssm->block_size, skew_block, ssm->block_size,
-                            0.0f, temp2, ssm->block_size);
-                
-                // For the derivative computation, we use a more accurate formula:
-                // For orthogonal matrices exp(S) where S is skew-symmetric,
-                // dexp(S)/ds_ij can be computed as:
-                // (exp(S) * E_ij + E_ij * exp(S)) / 2
-                
-                // temp1 = exp(S) * E_ij
-                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                            ssm->block_size, ssm->block_size, ssm->block_size,
-                            1.0f, exp_block, ssm->block_size, E_ij, ssm->block_size,
-                            0.0f, temp1, ssm->block_size);
-                
-                // temp2 = E_ij * exp(S)
-                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                            ssm->block_size, ssm->block_size, ssm->block_size,
-                            1.0f, E_ij, ssm->block_size, exp_block, ssm->block_size,
-                            0.0f, temp2, ssm->block_size);
-                
-                // Chain rule: ∂L/∂s_ij = trace(∂L/∂A * ∂A/∂s_ij)
-                float grad_sum = 0.0f;
-                for (int k = 0; k < ssm->block_size * ssm->block_size; k++) {
-                    // Average of the two terms for symmetry
-                    float derivative = 0.5f * (temp1[k] + temp2[k]);
-                    grad_sum += grad_block[k] * derivative;
-                }
-                
-                block_grad_params[param_idx] = grad_sum;
-                param_idx++;
-            }
-        }
-    }
+    compute_skew_gradients(ssm);
 }
 
 // Update weights using AdamW
