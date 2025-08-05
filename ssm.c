@@ -1,176 +1,5 @@
 #include "ssm.h"
 
-// Padé approximation for matrix exponential exp(A)
-static void matrix_exp_pade(float* result, const float* skew_matrix, int size, float* workspace, int* ipiv) {
-    float* A2 = workspace;
-    float* A4 = workspace + size * size;
-    float* U = workspace + 2 * size * size;
-    float* V = workspace + 3 * size * size;
-    float* N = workspace + 4 * size * size;
-    float* D = workspace + 5 * size * size;
-    
-    // A^2
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                size, size, size, 1.0f, skew_matrix, size, skew_matrix, size, 0.0f, A2, size);
-    
-    // A^4 = A^2 * A^2
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                size, size, size, 1.0f, A2, size, A2, size, 0.0f, A4, size);
-    
-    // Initialize V = 120*I + 120*A^2 + A^4
-    for (int i = 0; i < size; i++) {
-        for (int j = 0; j < size; j++) {
-            int idx = i * size + j;
-            V[idx] = 120.0f * A2[idx] + A4[idx];
-            if (i == j) {
-                V[idx] += 120.0f;  // 120*I
-            }
-        }
-    }
-    
-    // U = A^4 + 60*A^2 + 120*I
-    for (int i = 0; i < size; i++) {
-        for (int j = 0; j < size; j++) {
-            int idx = i * size + j;
-            U[idx] = A4[idx] + 60.0f * A2[idx];
-            if (i == j) {
-                U[idx] += 120.0f;  // 120*I
-            }
-        }
-    }
-    
-    // U = A * U
-    memcpy(N, U, size * size * sizeof(float));
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                size, size, size, 1.0f, skew_matrix, size, N, size, 0.0f, U, size);
-    
-    // N = U + V, D = V - U
-    for (int i = 0; i < size * size; i++) {
-        N[i] = U[i] + V[i];
-        D[i] = V[i] - U[i];
-    }
-    
-    // Solve D * result = N
-    memcpy(result, N, size * size * sizeof(float));
-    LAPACKE_sgetrf(LAPACK_ROW_MAJOR, size, size, D, size, ipiv);
-    LAPACKE_sgetrs(LAPACK_ROW_MAJOR, 'N', size, size, D, size, ipiv, result, size);
-}
-
-// Construct skew-symmetric matrix from parameters
-static void construct_skew_matrix(float* skew_matrix, const float* params, int size) {
-    memset(skew_matrix, 0, size * size * sizeof(float));
-    
-    int param_idx = 0;
-    for (int i = 0; i < size; i++) {
-        for (int j = i + 1; j < size; j++) {
-            float val = params[param_idx++];
-            skew_matrix[i * size + j] = val;
-            skew_matrix[j * size + i] = -val;
-        }
-    }
-}
-
-// Compute A matrix from block-diagonal structure
-static void compute_A_from_blocks(SSM* ssm) {
-    memset(ssm->A, 0, ssm->state_dim * ssm->state_dim * sizeof(float));
-    
-    float* skew_block = ssm->workspace;
-    float* exp_block = ssm->workspace + ssm->block_size * ssm->block_size;
-    float* pade_work = ssm->workspace + 2 * ssm->block_size * ssm->block_size;
-    
-    for (int block = 0; block < ssm->num_blocks; block++) {
-        int block_start = block * ssm->block_size;
-        const float* block_params = ssm->A_skew + block * (ssm->block_size * (ssm->block_size - 1) / 2);
-        
-        // Construct skew-symmetric matrix for this block
-        construct_skew_matrix(skew_block, block_params, ssm->block_size);
-        
-        // Compute matrix exponential
-        matrix_exp_pade(exp_block, skew_block, ssm->block_size, pade_work, ssm->ipiv);
-        
-        // Copy to appropriate block in A
-        for (int i = 0; i < ssm->block_size; i++) {
-            for (int j = 0; j < ssm->block_size; j++) {
-                int A_i = block_start + i;
-                int A_j = block_start + j;
-                if (A_i < ssm->state_dim && A_j < ssm->state_dim) {
-                    ssm->A[A_i * ssm->state_dim + A_j] = exp_block[i * ssm->block_size + j];
-                }
-            }
-        }
-    }
-}
-
-// Compute gradients with respect to skew parameters using analytical derivatives
-static void compute_skew_gradients(SSM* ssm) {
-    memset(ssm->A_skew_grad, 0, (ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2) * sizeof(float));
-    
-    float* skew_block = ssm->workspace;
-    float* exp_block = ssm->workspace + ssm->block_size * ssm->block_size;
-    float* pade_work = ssm->workspace + 2 * ssm->block_size * ssm->block_size;
-    float* grad_block = ssm->workspace + 8 * ssm->block_size * ssm->block_size;
-    float* temp1 = ssm->workspace + 9 * ssm->block_size * ssm->block_size;
-    float* temp2 = ssm->workspace + 10 * ssm->block_size * ssm->block_size;
-    float* E_ij = ssm->workspace + 11 * ssm->block_size * ssm->block_size;
-    
-    for (int block = 0; block < ssm->num_blocks; block++) {
-        int block_start = block * ssm->block_size;
-        const float* block_params = ssm->A_skew + block * (ssm->block_size * (ssm->block_size - 1) / 2);
-        float* block_grad_params = ssm->A_skew_grad + block * (ssm->block_size * (ssm->block_size - 1) / 2);
-        
-        // Extract gradient block from A_grad
-        for (int i = 0; i < ssm->block_size; i++) {
-            for (int j = 0; j < ssm->block_size; j++) {
-                int A_i = block_start + i;
-                int A_j = block_start + j;
-                if (A_i < ssm->state_dim && A_j < ssm->state_dim) {
-                    grad_block[i * ssm->block_size + j] = ssm->A_grad[A_i * ssm->state_dim + A_j];
-                } else {
-                    grad_block[i * ssm->block_size + j] = 0.0f;
-                }
-            }
-        }
-        
-        // Construct skew-symmetric matrix and compute exponential for this block
-        construct_skew_matrix(skew_block, block_params, ssm->block_size);
-        matrix_exp_pade(exp_block, skew_block, ssm->block_size, pade_work, ssm->ipiv);
-        
-        // Compute analytical gradients using Fréchet derivative
-        // For skew-symmetric matrices: d(exp(S))/ds_ij ≈ (exp(S) * E_ij + E_ij * exp(S)) / 2
-        int param_idx = 0;
-        for (int i = 0; i < ssm->block_size; i++) {
-            for (int j = i + 1; j < ssm->block_size; j++) {
-                // Create elementary skew-symmetric matrix E_ij
-                memset(E_ij, 0, ssm->block_size * ssm->block_size * sizeof(float));
-                E_ij[i * ssm->block_size + j] = 1.0f;
-                E_ij[j * ssm->block_size + i] = -1.0f;
-                
-                // temp1 = exp(S) * E_ij
-                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                            ssm->block_size, ssm->block_size, ssm->block_size,
-                            1.0f, exp_block, ssm->block_size, E_ij, ssm->block_size,
-                            0.0f, temp1, ssm->block_size);
-                
-                // temp2 = E_ij * exp(S)
-                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                            ssm->block_size, ssm->block_size, ssm->block_size,
-                            1.0f, E_ij, ssm->block_size, exp_block, ssm->block_size,
-                            0.0f, temp2, ssm->block_size);
-                
-                // Chain rule: ∂L/∂s_ij = trace(∂L/∂A * ∂A/∂s_ij)
-                float grad_sum = 0.0f;
-                for (int k = 0; k < ssm->block_size * ssm->block_size; k++) {
-                    float derivative = 0.5f * (temp1[k] + temp2[k]);
-                    grad_sum += grad_block[k] * derivative;
-                }
-                
-                block_grad_params[param_idx] = grad_sum;
-                param_idx++;
-            }
-        }
-    }
-}
-
 // Initialize the state space model
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size) {
     SSM* ssm = (SSM*)malloc(sizeof(SSM));
@@ -189,57 +18,50 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->t = 0;
     ssm->weight_decay = 0.001f;
     
-    // Block configuration
-    ssm->block_size = 16;
-    ssm->num_blocks = (state_dim + ssm->block_size - 1) / ssm->block_size;
-
     // Allocate state space matrices
-    ssm->A = (float*)calloc(ssm->state_dim * ssm->state_dim, sizeof(float));
-    ssm->B = (float*)malloc(ssm->state_dim * input_dim * sizeof(float));
-    ssm->C = (float*)malloc(output_dim * ssm->state_dim * sizeof(float));
+    ssm->A = (float*)calloc(state_dim * state_dim, sizeof(float));
+    ssm->B = (float*)malloc(state_dim * input_dim * sizeof(float));
+    ssm->C = (float*)malloc(output_dim * state_dim * sizeof(float));
     ssm->D = (float*)malloc(output_dim * input_dim * sizeof(float));
     
-    // Allocate block-diagonal parameters
-    ssm->A_skew = (float*)malloc((ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2) * sizeof(float));
-    
     // Allocate gradients
-    ssm->A_grad = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
-    ssm->B_grad = (float*)malloc(ssm->state_dim * input_dim * sizeof(float));
-    ssm->C_grad = (float*)malloc(output_dim * ssm->state_dim * sizeof(float));
+    ssm->A_grad = (float*)malloc(state_dim * state_dim * sizeof(float));
+    ssm->B_grad = (float*)malloc(state_dim * input_dim * sizeof(float));
+    ssm->C_grad = (float*)malloc(output_dim * state_dim * sizeof(float));
     ssm->D_grad = (float*)malloc(output_dim * input_dim * sizeof(float));
-    ssm->A_skew_grad = (float*)malloc((ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2) * sizeof(float));
     
     // Allocate Adam buffers
-    ssm->B_m = (float*)calloc(ssm->state_dim * input_dim, sizeof(float));
-    ssm->B_v = (float*)calloc(ssm->state_dim * input_dim, sizeof(float));
-    ssm->C_m = (float*)calloc(output_dim * ssm->state_dim, sizeof(float));
-    ssm->C_v = (float*)calloc(output_dim * ssm->state_dim, sizeof(float));
+    ssm->A_m = (float*)calloc(state_dim * state_dim, sizeof(float));
+    ssm->A_v = (float*)calloc(state_dim * state_dim, sizeof(float));
+    ssm->B_m = (float*)calloc(state_dim * input_dim, sizeof(float));
+    ssm->B_v = (float*)calloc(state_dim * input_dim, sizeof(float));
+    ssm->C_m = (float*)calloc(output_dim * state_dim, sizeof(float));
+    ssm->C_v = (float*)calloc(output_dim * state_dim, sizeof(float));
     ssm->D_m = (float*)calloc(output_dim * input_dim, sizeof(float));
     ssm->D_v = (float*)calloc(output_dim * input_dim, sizeof(float));
-    ssm->A_skew_m = (float*)calloc((ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2), sizeof(float));
-    ssm->A_skew_v = (float*)calloc((ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2), sizeof(float));
     
     // Allocate helper arrays (time-major format)
-    ssm->states = (float*)malloc(seq_len * batch_size * ssm->state_dim * sizeof(float));
+    ssm->states = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     ssm->predictions = (float*)malloc(seq_len * batch_size * output_dim * sizeof(float));
     ssm->error = (float*)malloc(seq_len * batch_size * output_dim * sizeof(float));
-    ssm->state_error = (float*)malloc(seq_len * batch_size * ssm->state_dim * sizeof(float));
-    ssm->state_outputs = (float*)malloc(seq_len * batch_size * ssm->state_dim * sizeof(float));
-    
-    // Allocate unified workspace
-    ssm->workspace = (float*)malloc(12 * ssm->block_size * ssm->block_size * sizeof(float));
-    ssm->ipiv = (int*)malloc(ssm->block_size * sizeof(int));
+    ssm->state_error = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
+    ssm->state_outputs = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     
     // Initialize B, C, D matrices
+    float scale_A = 0.1f / sqrtf(state_dim);
     float scale_B = 0.5f / sqrtf(input_dim);
-    float scale_C = 0.5f / sqrtf(ssm->state_dim);
+    float scale_C = 0.5f / sqrtf(state_dim);
     float scale_D = 0.1f / sqrtf(input_dim);
+
+    for (int i = 0; i < state_dim * state_dim; i++) {
+        ssm->A[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_A;
+    }
     
-    for (int i = 0; i < ssm->state_dim * input_dim; i++) {
+    for (int i = 0; i < state_dim * input_dim; i++) {
         ssm->B[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_B;
     }
     
-    for (int i = 0; i < output_dim * ssm->state_dim; i++) {
+    for (int i = 0; i < output_dim * state_dim; i++) {
         ssm->C[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_C;
     }
     
@@ -247,29 +69,17 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
         ssm->D[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_D;
     }
     
-    // Initialize skew-symmetric parameters
-    float skew_scale = 0.1f;
-    for (int i = 0; i < (ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2); i++) {
-        ssm->A_skew[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * skew_scale;
-    }
-    
-    // Compute initial A matrix from blocks
-    compute_A_from_blocks(ssm);
-    
     return ssm;
 }
 
 // Free memory
 void free_ssm(SSM* ssm) {
     free(ssm->A); free(ssm->B); free(ssm->C); free(ssm->D);
-    free(ssm->A_skew);
     free(ssm->A_grad); free(ssm->B_grad); free(ssm->C_grad); free(ssm->D_grad);
-    free(ssm->A_skew_grad);
-    free(ssm->B_m); free(ssm->B_v); free(ssm->C_m); free(ssm->C_v);
-    free(ssm->D_m); free(ssm->D_v); free(ssm->A_skew_m); free(ssm->A_skew_v);
+    free(ssm->A_m); free(ssm->A_v); free(ssm->B_m); free(ssm->B_v);
+    free(ssm->C_m); free(ssm->C_v); free(ssm->D_m); free(ssm->D_v);
     free(ssm->states); free(ssm->predictions); free(ssm->error); free(ssm->state_error);
     free(ssm->state_outputs);
-    free(ssm->workspace); free(ssm->ipiv);
     free(ssm);
 }
 
@@ -344,7 +154,6 @@ void zero_gradients_ssm(SSM* ssm) {
     memset(ssm->B_grad, 0, ssm->state_dim * ssm->input_dim * sizeof(float));
     memset(ssm->C_grad, 0, ssm->output_dim * ssm->state_dim * sizeof(float));
     memset(ssm->D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(float));
-    memset(ssm->A_skew_grad, 0, (ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2) * sizeof(float));
 }
 
 // Backward pass
@@ -374,7 +183,7 @@ void backward_pass_ssm(SSM* ssm, float* X) {
                     1.0f, ssm->D_grad, ssm->input_dim);
         
         // ∂L/∂O_t = (∂L/∂Y_t)C
-        float* do_t = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim; // reuse buffer
+        float* do_t = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim;
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                     ssm->batch_size, ssm->state_dim, ssm->output_dim,
                     1.0f, dy_t, ssm->output_dim,
@@ -415,9 +224,6 @@ void backward_pass_ssm(SSM* ssm, float* X) {
                         1.0f, ssm->A_grad, ssm->state_dim);
         }
     }
-    
-    // Compute gradients with respect to skew parameters
-    compute_skew_gradients(ssm);
 }
 
 // Update weights using AdamW
@@ -428,13 +234,13 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     float beta2_t = powf(ssm->beta2, ssm->t);
     float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
     
-    // Update A_skew parameters
-    for (int i = 0; i < (ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2); i++) {
-        float grad = ssm->A_skew_grad[i] / ssm->batch_size;
-        ssm->A_skew_m[i] = ssm->beta1 * ssm->A_skew_m[i] + (1.0f - ssm->beta1) * grad;
-        ssm->A_skew_v[i] = ssm->beta2 * ssm->A_skew_v[i] + (1.0f - ssm->beta2) * grad * grad;
-        float update = alpha_t * ssm->A_skew_m[i] / (sqrtf(ssm->A_skew_v[i]) + ssm->epsilon);
-        ssm->A_skew[i] = ssm->A_skew[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
+    // Update A
+    for (int i = 0; i < ssm->state_dim * ssm->state_dim; i++) {
+        float grad = ssm->A_grad[i] / ssm->batch_size;
+        ssm->A_m[i] = ssm->beta1 * ssm->A_m[i] + (1.0f - ssm->beta1) * grad;
+        ssm->A_v[i] = ssm->beta2 * ssm->A_v[i] + (1.0f - ssm->beta2) * grad * grad;
+        float update = alpha_t * ssm->A_m[i] / (sqrtf(ssm->A_v[i]) + ssm->epsilon);
+        ssm->A[i] = ssm->A[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
     }
     
     // Update B
@@ -463,9 +269,6 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
         float update = alpha_t * ssm->D_m[i] / (sqrtf(ssm->D_v[i]) + ssm->epsilon);
         ssm->D[i] = ssm->D[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
     }
-    
-    // Recompute A matrix from updated skew parameters
-    compute_A_from_blocks(ssm);
 }
 
 // Save model
@@ -482,19 +285,17 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(&ssm->output_dim, sizeof(int), 1, file);
     fwrite(&ssm->seq_len, sizeof(int), 1, file);
     fwrite(&ssm->batch_size, sizeof(int), 1, file);
-    fwrite(&ssm->num_blocks, sizeof(int), 1, file);
-    fwrite(&ssm->block_size, sizeof(int), 1, file);
     
     // Save matrices
-    fwrite(ssm->A_skew, sizeof(float), (ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2), file);
+    fwrite(ssm->A, sizeof(float), ssm->state_dim * ssm->state_dim, file);
     fwrite(ssm->B, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(ssm->C, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(ssm->D, sizeof(float), ssm->output_dim * ssm->input_dim, file);
     
     // Save Adam state
     fwrite(&ssm->t, sizeof(int), 1, file);
-    fwrite(ssm->A_skew_m, sizeof(float), (ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2), file);
-    fwrite(ssm->A_skew_v, sizeof(float), (ssm->num_blocks * ssm->block_size * (ssm->block_size - 1) / 2), file);
+    fwrite(ssm->A_m, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    fwrite(ssm->A_v, sizeof(float), ssm->state_dim * ssm->state_dim, file);
     fwrite(ssm->B_m, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(ssm->B_v, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(ssm->C_m, sizeof(float), ssm->output_dim * ssm->state_dim, file);
@@ -516,15 +317,11 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     
     // Read dimensions
     int input_dim, state_dim, output_dim, seq_len, stored_batch_size;
-    int num_blocks, block_size;
-    
     fread(&input_dim, sizeof(int), 1, file);
     fread(&state_dim, sizeof(int), 1, file);
     fread(&output_dim, sizeof(int), 1, file);
     fread(&seq_len, sizeof(int), 1, file);
     fread(&stored_batch_size, sizeof(int), 1, file);
-    fread(&num_blocks, sizeof(int), 1, file);
-    fread(&block_size, sizeof(int), 1, file);
     
     int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
     
@@ -532,24 +329,21 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
     
     // Load matrices
-    fread(ssm->A_skew, sizeof(float), (num_blocks * block_size * (block_size - 1) / 2), file);
+    fread(ssm->A, sizeof(float), state_dim * state_dim, file);
     fread(ssm->B, sizeof(float), state_dim * input_dim, file);
     fread(ssm->C, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D, sizeof(float), output_dim * input_dim, file);
     
     // Load Adam state
     fread(&ssm->t, sizeof(int), 1, file);
-    fread(ssm->A_skew_m, sizeof(float), (num_blocks * block_size * (block_size - 1) / 2), file);
-    fread(ssm->A_skew_v, sizeof(float), (num_blocks * block_size * (block_size - 1) / 2), file);
+    fread(ssm->A_m, sizeof(float), state_dim * state_dim, file);
+    fread(ssm->A_v, sizeof(float), state_dim * state_dim, file);
     fread(ssm->B_m, sizeof(float), state_dim * input_dim, file);
     fread(ssm->B_v, sizeof(float), state_dim * input_dim, file);
     fread(ssm->C_m, sizeof(float), output_dim * state_dim, file);
     fread(ssm->C_v, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D_m, sizeof(float), output_dim * input_dim, file);
     fread(ssm->D_v, sizeof(float), output_dim * input_dim, file);
-    
-    // Recompute A matrix from loaded skew parameters
-    compute_A_from_blocks(ssm);
     
     fclose(file);
     printf("Model loaded from %s\n", filename);

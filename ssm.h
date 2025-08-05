@@ -6,30 +6,25 @@
 #include <string.h>
 #include <math.h>
 #include <cblas.h>
-#include <lapacke.h>
 
 typedef struct {
     // State space matrices
-    float* A;           // state_dim x state_dim (computed from blocks)
+    float* A;           // state_dim x state_dim (state transition)
     float* B;           // state_dim x input_dim (input to state)
     float* C;           // output_dim x state_dim (state to output)
     float* D;           // output_dim x input_dim (input to output)
-    
-    // Block-diagonal orthogonal parameterization
-    float* A_skew;      // skew-symmetric parameters for all blocks
     
     // Gradients
     float* A_grad;      // state_dim x state_dim
     float* B_grad;      // state_dim x input_dim
     float* C_grad;      // output_dim x state_dim
     float* D_grad;      // output_dim x input_dim
-    float* A_skew_grad; // gradient w.r.t. skew parameters
     
-    // Adam parameters for B, C, D, A_skew
+    // Adam parameters for A, B, C, D
+    float* A_m; float* A_v;
     float* B_m; float* B_v;
     float* C_m; float* C_v;
     float* D_m; float* D_v;
-    float* A_skew_m; float* A_skew_v;
     
     float beta1, beta2, epsilon;
     int t;
@@ -42,18 +37,12 @@ typedef struct {
     float* state_error;    // seq_len x batch_size x state_dim
     float* state_outputs;  // seq_len x batch_size x state_dim
     
-    // Working memory for matrix operations
-    float* workspace;      // pre-allocated workspace
-    int* ipiv;             // pivot indices
-    
     // Dimensions
     int input_dim;
     int state_dim;
     int output_dim;
     int seq_len;
     int batch_size;
-    int num_blocks;
-    int block_size;
 } SSM;
 
 // Function prototypes
