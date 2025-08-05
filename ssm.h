@@ -6,6 +6,7 @@
 #include <string.h>
 #include <math.h>
 #include <cblas.h>
+#include <lapacke.h>
 
 typedef struct {
     // State space matrices
@@ -15,10 +16,7 @@ typedef struct {
     float* D;           // output_dim x input_dim (input to output)
     
     // Block-diagonal orthogonal parameterization
-    int num_blocks;     // number of blocks
-    int block_size;     // size of each block
-    float* A_skew;      // flattened skew-symmetric parameters for all blocks
-    int skew_params_per_block;  // block_size * (block_size - 1) / 2
+    float* A_skew;      // skew-symmetric parameters for all blocks
     
     // Gradients
     float* A_grad;      // state_dim x state_dim
@@ -44,9 +42,9 @@ typedef struct {
     float* state_error;    // seq_len x batch_size x state_dim
     float* state_outputs;  // seq_len x batch_size x state_dim
     
-    // Working memory for matrix exponential computation
-    float* block_work;     // workspace for individual block operations
-    float* exp_blocks;     // temporary storage for exp(S) blocks
+    // Working memory for matrix operations
+    float* workspace;      // pre-allocated workspace
+    int* ipiv;             // pivot indices
     
     // Dimensions
     int input_dim;
@@ -54,6 +52,8 @@ typedef struct {
     int output_dim;
     int seq_len;
     int batch_size;
+    int num_blocks;
+    int block_size;
 } SSM;
 
 // Function prototypes
@@ -67,11 +67,5 @@ void backward_pass_ssm(SSM* ssm, float* X);
 void update_weights_ssm(SSM* ssm, float learning_rate);
 void save_ssm(SSM* ssm, const char* filename);
 SSM* load_ssm(const char* filename, int custom_batch_size);
-
-// Block-diagonal orthogonal matrix utilities
-void matrix_exp_pade(float* result, const float* skew_matrix, int size, float* workspace);
-void construct_skew_matrix(float* skew_matrix, const float* params, int size);
-void compute_A_from_blocks(SSM* ssm);
-void compute_skew_gradients(SSM* ssm);
 
 #endif
