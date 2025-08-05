@@ -35,7 +35,6 @@ typedef struct {
     float* predictions;     // seq_len x batch_size x output_dim
     float* error;          // seq_len x batch_size x output_dim
     float* state_error;    // seq_len x batch_size x state_dim
-    float* state_outputs;  // seq_len x batch_size x state_dim
     float* X_outer;        // seq_len x batch_size x (input_dim * input_dim) (outer products)
     
     // Dimensions
