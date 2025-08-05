@@ -10,13 +10,13 @@
 typedef struct {
     // State space matrices
     float* A;           // state_dim x state_dim (state transition)
-    float* W_B;         // state_dim x input_dim (weight matrix for input-dependent B)
+    float* W_B;         // state_dim x (input_dim * input_dim) (weights for input-dependent B)
     float* C;           // output_dim x state_dim (state to output)
     float* D;           // output_dim x input_dim (input to output)
     
     // Gradients
     float* A_grad;      // state_dim x state_dim
-    float* W_B_grad;    // state_dim x input_dim
+    float* W_B_grad;    // state_dim x (input_dim * input_dim)
     float* C_grad;      // output_dim x state_dim
     float* D_grad;      // output_dim x input_dim
     
@@ -36,7 +36,7 @@ typedef struct {
     float* error;          // seq_len x batch_size x output_dim
     float* state_error;    // seq_len x batch_size x state_dim
     float* state_outputs;  // seq_len x batch_size x state_dim
-    float* B_t;             // state_dim x input_dim (computed B matrix for current timestep)
+    float* X_outer;        // seq_len x batch_size x (input_dim * input_dim) (outer products)
     
     // Dimensions
     int input_dim;

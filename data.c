@@ -120,7 +120,7 @@ void generate_synthetic_data(float** X, float** y, int num_sequences, int seq_le
         // Generate random terms
         for (int term = 0; term < num_terms; term++) {
             coefficients[output_idx][term] = 0.1f + 0.4f * ((float)rand() / (float)RAND_MAX);
-            operations[output_idx][term] = rand() % 5; // Only use simpler terms
+            operations[output_idx][term] = rand() % 7;
             idx1[output_idx][term] = rand() % input_dim;
             idx2[output_idx][term] = rand() % input_dim;
             add_subtract[output_idx][term] = rand() % 2;

@@ -20,21 +20,21 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     
     // Allocate state space matrices
     ssm->A = (float*)calloc(state_dim * state_dim, sizeof(float));
-    ssm->W_B = (float*)malloc(state_dim * input_dim * sizeof(float));
+    ssm->W_B = (float*)malloc(state_dim * input_dim * input_dim * sizeof(float));
     ssm->C = (float*)malloc(output_dim * state_dim * sizeof(float));
     ssm->D = (float*)malloc(output_dim * input_dim * sizeof(float));
     
     // Allocate gradients
     ssm->A_grad = (float*)malloc(state_dim * state_dim * sizeof(float));
-    ssm->W_B_grad = (float*)malloc(state_dim * input_dim * sizeof(float));
+    ssm->W_B_grad = (float*)malloc(state_dim * input_dim * input_dim * sizeof(float));
     ssm->C_grad = (float*)malloc(output_dim * state_dim * sizeof(float));
     ssm->D_grad = (float*)malloc(output_dim * input_dim * sizeof(float));
     
     // Allocate Adam buffers
     ssm->A_m = (float*)calloc(state_dim * state_dim, sizeof(float));
     ssm->A_v = (float*)calloc(state_dim * state_dim, sizeof(float));
-    ssm->W_B_m = (float*)calloc(state_dim * input_dim, sizeof(float));
-    ssm->W_B_v = (float*)calloc(state_dim * input_dim, sizeof(float));
+    ssm->W_B_m = (float*)calloc(state_dim * input_dim * input_dim, sizeof(float));
+    ssm->W_B_v = (float*)calloc(state_dim * input_dim * input_dim, sizeof(float));
     ssm->C_m = (float*)calloc(output_dim * state_dim, sizeof(float));
     ssm->C_v = (float*)calloc(output_dim * state_dim, sizeof(float));
     ssm->D_m = (float*)calloc(output_dim * input_dim, sizeof(float));
@@ -46,11 +46,11 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->error = (float*)malloc(seq_len * batch_size * output_dim * sizeof(float));
     ssm->state_error = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     ssm->state_outputs = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
-    ssm->B_t = (float*)malloc(state_dim * input_dim * sizeof(float));
+    ssm->X_outer = (float*)malloc(seq_len * batch_size * input_dim * input_dim * sizeof(float));
     
     // Initialize A, W_B, C, D matrices
     float scale_A = 0.1f / sqrtf(state_dim);
-    float scale_W_B = 0.5f / sqrtf(input_dim);
+    float scale_W_B = 0.1f / sqrtf(input_dim * input_dim);
     float scale_C = 0.5f / sqrtf(state_dim);
     float scale_D = 0.1f / sqrtf(input_dim);
 
@@ -58,7 +58,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
         ssm->A[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_A;
     }
     
-    for (int i = 0; i < state_dim * input_dim; i++) {
+    for (int i = 0; i < state_dim * input_dim * input_dim; i++) {
         ssm->W_B[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_W_B;
     }
     
@@ -80,7 +80,7 @@ void free_ssm(SSM* ssm) {
     free(ssm->A_m); free(ssm->A_v); free(ssm->W_B_m); free(ssm->W_B_v);
     free(ssm->C_m); free(ssm->C_v); free(ssm->D_m); free(ssm->D_v);
     free(ssm->states); free(ssm->predictions); free(ssm->error); free(ssm->state_error);
-    free(ssm->state_outputs); free(ssm->B_t);
+    free(ssm->state_outputs); free(ssm->X_outer);
     free(ssm);
 }
 
@@ -96,27 +96,31 @@ void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
     float* h_t = ssm->states + timestep * ssm->batch_size * ssm->state_dim;
     float* o_t = ssm->state_outputs + timestep * ssm->batch_size * ssm->state_dim;
     float* y_t = ssm->predictions + timestep * ssm->batch_size * ssm->output_dim;
+    
+    // Compute input-dependent B using bilinear form: H_t[i] = X_t^T W_B[i] X_t
+    // Step 1: Compute outer products X_t ⊗ X_t for each batch element
+    float* X_outer_t = ssm->X_outer + timestep * ssm->batch_size * ssm->input_dim * ssm->input_dim;
+    
+    for (int b = 0; b < ssm->batch_size; b++) {
+        float* X_b = X_t + b * ssm->input_dim;
+        float* X_outer_b = X_outer_t + b * ssm->input_dim * ssm->input_dim;
         
-    // Compute input-dependent B_t = W_B * f(X_t)
-    // Use a more stable reduction: just use a small factor of the first element
-    // This maintains input dependence while being more numerically stable
-    float x_factor = X_t[0] * 0.1f;  // Use first element, scaled down
-    
-    // Clip to ensure stability
-    if (x_factor > 1.0f) x_factor = 1.0f;
-    if (x_factor < -1.0f) x_factor = -1.0f;
-    
-    // B_t = W_B * x_factor (element-wise multiplication)
-    for (int i = 0; i < ssm->state_dim * ssm->input_dim; i++) {
-        ssm->B_t[i] = ssm->W_B[i] * x_factor;
+        // Compute outer product X_b ⊗ X_b using sgemm
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                    ssm->input_dim, ssm->input_dim, 1,
+                    1.0f, X_b, 1,  // X_b as column vector (input_dim x 1)
+                    X_b, 1,        // X_b as row vector (1 x input_dim)
+                    0.0f, X_outer_b, ssm->input_dim);
     }
     
-    // H_t = X_t B_t^T + H_{t-1} A^T
-    // H_t = X_t B_t^T
+    // Step 2: H_t = X_outer * W_B^T
+    // X_outer_t: batch_size x (input_dim * input_dim)
+    // W_B: state_dim x (input_dim * input_dim)
+    // Result: batch_size x state_dim
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                ssm->batch_size, ssm->state_dim, ssm->input_dim,
-                1.0f, X_t, ssm->input_dim,
-                ssm->B_t, ssm->input_dim,
+                ssm->batch_size, ssm->state_dim, ssm->input_dim * ssm->input_dim,
+                1.0f, X_outer_t, ssm->input_dim * ssm->input_dim,
+                ssm->W_B, ssm->input_dim * ssm->input_dim,
                 0.0f, h_t, ssm->state_dim);
     
     // H_t += H_{t-1} A^T
@@ -128,7 +132,7 @@ void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
                     1.0f, h_t, ssm->state_dim);
     }
     
-    // O_t = H_t σ(H_t)
+    // O_t = H_t σ(H_t) (Swish activation)
     for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
         float h = h_t[i];
         o_t[i] = h / (1.0f + expf(-h));
@@ -166,7 +170,7 @@ float calculate_loss_ssm(SSM* ssm, float* y) {
 // Zero gradients
 void zero_gradients_ssm(SSM* ssm) {
     memset(ssm->A_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float));
-    memset(ssm->W_B_grad, 0, ssm->state_dim * ssm->input_dim * sizeof(float));
+    memset(ssm->W_B_grad, 0, ssm->state_dim * ssm->input_dim * ssm->input_dim * sizeof(float));
     memset(ssm->C_grad, 0, ssm->output_dim * ssm->state_dim * sizeof(float));
     memset(ssm->D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(float));
 }
@@ -182,6 +186,7 @@ void backward_pass_ssm(SSM* ssm, float* X) {
         float* o_t = ssm->state_outputs + t * ssm->batch_size * ssm->state_dim;
         float* dy_t = ssm->error + t * ssm->batch_size * ssm->output_dim;
         float* dh_t = ssm->state_error + t * ssm->batch_size * ssm->state_dim;
+        float* X_outer_t = ssm->X_outer + t * ssm->batch_size * ssm->input_dim * ssm->input_dim;
         
         // ∂L/∂C += (∂L/∂Y_t)^T O_t
         cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
@@ -222,29 +227,15 @@ void backward_pass_ssm(SSM* ssm, float* X) {
                         1.0f, dh_t, ssm->state_dim);
         }
         
-        // Compute gradients for W_B
-        // We have: B_t = W_B * x_factor, H_t = X_t B_t^T
-        // So ∂L/∂W_B = ∂L/∂B_t * ∂B_t/∂W_B = ∂L/∂B_t * x_factor
-        // And ∂L/∂B_t = (∂L/∂H_t)^T X_t (same as the old ∂L/∂B computation)
-        
-        // Compute x_factor for this timestep (same as in forward pass)
-        float x_factor = X_t[0] * 0.1f;  // Use first element, scaled down
-        
-        // Clip to ensure stability (same as in forward pass)
-        if (x_factor > 1.0f) x_factor = 1.0f;
-        if (x_factor < -1.0f) x_factor = -1.0f;
-        
-        // Compute ∂L/∂B_t = (∂L/∂H_t)^T X_t (store in B_t temporarily)
+        // ∂L/∂W_B += ∂L/∂H_t^T * X_outer_t
+        // dh_t: batch_size x state_dim
+        // X_outer_t: batch_size x (input_dim * input_dim)
+        // W_B_grad: state_dim x (input_dim * input_dim)
         cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                    ssm->state_dim, ssm->input_dim, ssm->batch_size,
+                    ssm->state_dim, ssm->input_dim * ssm->input_dim, ssm->batch_size,
                     1.0f, dh_t, ssm->state_dim,
-                    X_t, ssm->input_dim,
-                    0.0f, ssm->B_t, ssm->input_dim);
-        
-        // ∂L/∂W_B += ∂L/∂B_t * x_factor
-        for (int i = 0; i < ssm->state_dim * ssm->input_dim; i++) {
-            ssm->W_B_grad[i] += ssm->B_t[i] * x_factor;
-        }
+                    X_outer_t, ssm->input_dim * ssm->input_dim,
+                    1.0f, ssm->W_B_grad, ssm->input_dim * ssm->input_dim);
         
         // ∂L/∂A += (∂L/∂H_t)^T H_{t-1}
         if (t > 0) {
@@ -276,7 +267,7 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     }
     
     // Update W_B
-    for (int i = 0; i < ssm->state_dim * ssm->input_dim; i++) {
+    for (int i = 0; i < ssm->state_dim * ssm->input_dim * ssm->input_dim; i++) {
         float grad = ssm->W_B_grad[i] / ssm->batch_size;
         ssm->W_B_m[i] = ssm->beta1 * ssm->W_B_m[i] + (1.0f - ssm->beta1) * grad;
         ssm->W_B_v[i] = ssm->beta2 * ssm->W_B_v[i] + (1.0f - ssm->beta2) * grad * grad;
@@ -320,7 +311,7 @@ void save_ssm(SSM* ssm, const char* filename) {
     
     // Save matrices
     fwrite(ssm->A, sizeof(float), ssm->state_dim * ssm->state_dim, file);
-    fwrite(ssm->W_B, sizeof(float), ssm->state_dim * ssm->input_dim, file);
+    fwrite(ssm->W_B, sizeof(float), ssm->state_dim * ssm->input_dim * ssm->input_dim, file);
     fwrite(ssm->C, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(ssm->D, sizeof(float), ssm->output_dim * ssm->input_dim, file);
     
@@ -328,8 +319,8 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(&ssm->t, sizeof(int), 1, file);
     fwrite(ssm->A_m, sizeof(float), ssm->state_dim * ssm->state_dim, file);
     fwrite(ssm->A_v, sizeof(float), ssm->state_dim * ssm->state_dim, file);
-    fwrite(ssm->W_B_m, sizeof(float), ssm->state_dim * ssm->input_dim, file);
-    fwrite(ssm->W_B_v, sizeof(float), ssm->state_dim * ssm->input_dim, file);
+    fwrite(ssm->W_B_m, sizeof(float), ssm->state_dim * ssm->input_dim * ssm->input_dim, file);
+    fwrite(ssm->W_B_v, sizeof(float), ssm->state_dim * ssm->input_dim * ssm->input_dim, file);
     fwrite(ssm->C_m, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(ssm->C_v, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(ssm->D_m, sizeof(float), ssm->output_dim * ssm->input_dim, file);
@@ -362,7 +353,7 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     
     // Load matrices
     fread(ssm->A, sizeof(float), state_dim * state_dim, file);
-    fread(ssm->W_B, sizeof(float), state_dim * input_dim, file);
+    fread(ssm->W_B, sizeof(float), state_dim * input_dim * input_dim, file);
     fread(ssm->C, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D, sizeof(float), output_dim * input_dim, file);
     
@@ -370,8 +361,8 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(&ssm->t, sizeof(int), 1, file);
     fread(ssm->A_m, sizeof(float), state_dim * state_dim, file);
     fread(ssm->A_v, sizeof(float), state_dim * state_dim, file);
-    fread(ssm->W_B_m, sizeof(float), state_dim * input_dim, file);
-    fread(ssm->W_B_v, sizeof(float), state_dim * input_dim, file);
+    fread(ssm->W_B_m, sizeof(float), state_dim * input_dim * input_dim, file);
+    fread(ssm->W_B_v, sizeof(float), state_dim * input_dim * input_dim, file);
     fread(ssm->C_m, sizeof(float), output_dim * state_dim, file);
     fread(ssm->C_v, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D_m, sizeof(float), output_dim * input_dim, file);
