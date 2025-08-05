@@ -47,7 +47,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->state_error = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     ssm->state_outputs = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
     
-    // Initialize B, C, D matrices
+    // Initialize A, B, C, D matrices
     float scale_A = 0.1f / sqrtf(state_dim);
     float scale_B = 0.5f / sqrtf(input_dim);
     float scale_C = 0.5f / sqrtf(state_dim);
