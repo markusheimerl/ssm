@@ -379,7 +379,7 @@ void save_ssm(SSM* ssm, const char* filename) {
         return;
     }
     
-    // Save dimensions
+    // Save dimensions first
     fwrite(&ssm->input_dim, sizeof(int), 1, file);
     fwrite(&ssm->state_dim, sizeof(int), 1, file);
     fwrite(&ssm->output_dim, sizeof(int), 1, file);
@@ -393,9 +393,15 @@ void save_ssm(SSM* ssm, const char* filename) {
     int W_C_size = ssm->output_dim * ssm->state_dim * ssm->state_dim;
     int D_size = ssm->output_dim * ssm->input_dim;
     
-    // Allocate temporary host memory for largest matrix
-    float* temp = (float*)malloc(W_C_size * sizeof(float));
+    // Find the maximum size
+    int max_size = A_size;
+    if (W_B_size > max_size) max_size = W_B_size;
+    if (W_C_size > max_size) max_size = W_C_size;
+    if (D_size > max_size) max_size = D_size;
     
+    // Allocate buffer
+    float* temp = (float*)malloc(max_size * sizeof(float));
+
     // Save matrices
     CHECK_CUDA(cudaMemcpy(temp, ssm->d_A, A_size * sizeof(float), cudaMemcpyDeviceToHost));
     fwrite(temp, sizeof(float), A_size, file);
@@ -406,10 +412,6 @@ void save_ssm(SSM* ssm, const char* filename) {
     CHECK_CUDA(cudaMemcpy(temp, ssm->d_W_C, W_C_size * sizeof(float), cudaMemcpyDeviceToHost));
     fwrite(temp, sizeof(float), W_C_size, file);
     
-    // Reallocate if needed for smaller matrix
-    if (D_size * sizeof(float) > W_C_size * sizeof(float)) {
-        temp = (float*)realloc(temp, D_size * sizeof(float));
-    }
     CHECK_CUDA(cudaMemcpy(temp, ssm->d_D, D_size * sizeof(float), cudaMemcpyDeviceToHost));
     fwrite(temp, sizeof(float), D_size, file);
     
@@ -429,10 +431,6 @@ void save_ssm(SSM* ssm, const char* filename) {
     CHECK_CUDA(cudaMemcpy(temp, ssm->d_W_C_v, W_C_size * sizeof(float), cudaMemcpyDeviceToHost));
     fwrite(temp, sizeof(float), W_C_size, file);
     
-    // Reallocate if needed for D matrices
-    if (D_size * sizeof(float) > W_C_size * sizeof(float)) {
-        temp = (float*)realloc(temp, D_size * sizeof(float));
-    }
     CHECK_CUDA(cudaMemcpy(temp, ssm->d_D_m, D_size * sizeof(float), cudaMemcpyDeviceToHost));
     fwrite(temp, sizeof(float), D_size, file);
     CHECK_CUDA(cudaMemcpy(temp, ssm->d_D_v, D_size * sizeof(float), cudaMemcpyDeviceToHost));
@@ -465,14 +463,20 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
     ssm->t = t;
     
-    // Calculate sizes
+    // Calculate all sizes
     int A_size = state_dim * state_dim;
     int W_B_size = state_dim * input_dim * input_dim;
     int W_C_size = output_dim * state_dim * state_dim;
     int D_size = output_dim * input_dim;
     
-    // Allocate temporary host memory for largest matrix
-    float* temp = (float*)malloc(W_C_size * sizeof(float));
+    // Find the maximum size
+    int max_size = A_size;
+    if (W_B_size > max_size) max_size = W_B_size;
+    if (W_C_size > max_size) max_size = W_C_size;
+    if (D_size > max_size) max_size = D_size;
+    
+    // Allocate buffer
+    float* temp = (float*)malloc(max_size * sizeof(float));
     
     // Load matrices
     fread(temp, sizeof(float), A_size, file);
@@ -484,35 +488,31 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(temp, sizeof(float), W_C_size, file);
     CHECK_CUDA(cudaMemcpy(ssm->d_W_C, temp, W_C_size * sizeof(float), cudaMemcpyHostToDevice));
     
-    // Reallocate if needed for smaller matrix
-    if (D_size * sizeof(float) > W_C_size * sizeof(float)) {
-        temp = (float*)realloc(temp, D_size * sizeof(float));
-    }
     fread(temp, sizeof(float), D_size, file);
     CHECK_CUDA(cudaMemcpy(ssm->d_D, temp, D_size * sizeof(float), cudaMemcpyHostToDevice));
     
     // Load Adam state
     fread(temp, sizeof(float), A_size, file);
     CHECK_CUDA(cudaMemcpy(ssm->d_A_m, temp, A_size * sizeof(float), cudaMemcpyHostToDevice));
+    
     fread(temp, sizeof(float), A_size, file);
     CHECK_CUDA(cudaMemcpy(ssm->d_A_v, temp, A_size * sizeof(float), cudaMemcpyHostToDevice));
     
     fread(temp, sizeof(float), W_B_size, file);
     CHECK_CUDA(cudaMemcpy(ssm->d_W_B_m, temp, W_B_size * sizeof(float), cudaMemcpyHostToDevice));
+    
     fread(temp, sizeof(float), W_B_size, file);
     CHECK_CUDA(cudaMemcpy(ssm->d_W_B_v, temp, W_B_size * sizeof(float), cudaMemcpyHostToDevice));
     
     fread(temp, sizeof(float), W_C_size, file);
     CHECK_CUDA(cudaMemcpy(ssm->d_W_C_m, temp, W_C_size * sizeof(float), cudaMemcpyHostToDevice));
+    
     fread(temp, sizeof(float), W_C_size, file);
     CHECK_CUDA(cudaMemcpy(ssm->d_W_C_v, temp, W_C_size * sizeof(float), cudaMemcpyHostToDevice));
     
-    // Reallocate if needed for D matrices
-    if (D_size * sizeof(float) > W_C_size * sizeof(float)) {
-        temp = (float*)realloc(temp, D_size * sizeof(float));
-    }
     fread(temp, sizeof(float), D_size, file);
     CHECK_CUDA(cudaMemcpy(ssm->d_D_m, temp, D_size * sizeof(float), cudaMemcpyHostToDevice));
+    
     fread(temp, sizeof(float), D_size, file);
     CHECK_CUDA(cudaMemcpy(ssm->d_D_v, temp, D_size * sizeof(float), cudaMemcpyHostToDevice));
     
