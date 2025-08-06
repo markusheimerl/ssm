@@ -71,16 +71,16 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     float scale_D = 0.1f / sqrtf(input_dim);
     
     for (int i = 0; i < A_size; i++) {
-        h_A[i] = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * scale_A;
+        h_A[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_A;
     }
     for (int i = 0; i < W_B_size; i++) {
-        h_W_B[i] = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * scale_W_B;
+        h_W_B[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_W_B;
     }
     for (int i = 0; i < W_C_size; i++) {
-        h_W_C[i] = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * scale_W_C;
+        h_W_C[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_W_C;
     }
     for (int i = 0; i < D_size; i++) {
-        h_D[i] = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * scale_D;
+        h_D[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_D;
     }
     
     // Copy initialized matrices to device
@@ -273,26 +273,26 @@ void backward_pass_ssm(SSM* ssm, float* d_X) {
                                 d_dy_t, ssm->output_dim,
                                 &beta, d_H_outer_grad, ssm->state_dim * ssm->state_dim));
         
-        // ∂L/∂H_t from outer product using GEMV calls
-        for (int b = 0; b < ssm->batch_size; b++) {
-            float* h_b = d_h_t + b * ssm->state_dim;
-            float* grad_outer_b = d_H_outer_grad + b * ssm->state_dim * ssm->state_dim;
-            float* dh_b = d_dh_t + b * ssm->state_dim;
-            
-            // First term: grad_outer @ H (treating grad_outer as state_dim x state_dim matrix)
-            CHECK_CUBLAS(cublasSgemv(ssm->cublas_handle, CUBLAS_OP_N,
-                                    ssm->state_dim, ssm->state_dim,
-                                    &alpha, grad_outer_b, ssm->state_dim,
-                                    h_b, 1,
-                                    &beta, dh_b, 1));
-            
-            // Second term: grad_outer^T @ H (transpose the matrix)
-            CHECK_CUBLAS(cublasSgemv(ssm->cublas_handle, CUBLAS_OP_T,
-                                    ssm->state_dim, ssm->state_dim,
-                                    &alpha, grad_outer_b, ssm->state_dim,
-                                    h_b, 1,
-                                    &beta_add, dh_b, 1));
-        }
+        // ∂L/∂H_t from outer product using strided batched GEMM
+        CHECK_CUBLAS(cublasSgemmStridedBatched(ssm->cublas_handle,
+                                            CUBLAS_OP_N, CUBLAS_OP_N,
+                                            ssm->state_dim, 1, ssm->state_dim,
+                                            &alpha,
+                                            d_H_outer_grad, ssm->state_dim, ssm->state_dim * ssm->state_dim,
+                                            d_h_t, ssm->state_dim, ssm->state_dim,
+                                            &beta,
+                                            d_dh_t, ssm->state_dim, ssm->state_dim,
+                                            ssm->batch_size));
+
+        CHECK_CUBLAS(cublasSgemmStridedBatched(ssm->cublas_handle,
+                                            CUBLAS_OP_T, CUBLAS_OP_N,
+                                            ssm->state_dim, 1, ssm->state_dim,
+                                            &alpha,
+                                            d_H_outer_grad, ssm->state_dim, ssm->state_dim * ssm->state_dim,
+                                            d_h_t, ssm->state_dim, ssm->state_dim,
+                                            &beta_add,
+                                            d_dh_t, ssm->state_dim, ssm->state_dim,
+                                            ssm->batch_size));
         
         // ∂L/∂H_t += (∂L/∂H_{t+1}) A (temporal gradient)
         if (t < ssm->seq_len - 1) {
