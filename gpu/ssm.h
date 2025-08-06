@@ -35,19 +35,19 @@
 typedef struct {
     // Device pointers for state space matrices
     float* d_A;           // state_dim x state_dim (state transition)
-    float* d_B;           // state_dim x input_dim (input to state)
+    float* d_W_B;         // state_dim x (input_dim * input_dim) (weights for input-dependent B)
     float* d_C;           // output_dim x state_dim (state to output)
     float* d_D;           // output_dim x input_dim (input to output)
     
     // Device pointers for gradients
     float* d_A_grad;      // state_dim x state_dim
-    float* d_B_grad;      // state_dim x input_dim
+    float* d_W_B_grad;    // state_dim x (input_dim * input_dim)
     float* d_C_grad;      // output_dim x state_dim
     float* d_D_grad;      // output_dim x input_dim
     
     // Device pointers for Adam parameters
     float* d_A_m; float* d_A_v;
-    float* d_B_m; float* d_B_v;
+    float* d_W_B_m; float* d_W_B_v;
     float* d_C_m; float* d_C_v;
     float* d_D_m; float* d_D_v;
     
@@ -60,7 +60,7 @@ typedef struct {
     float* d_predictions;     // seq_len x batch_size x output_dim
     float* d_error;          // seq_len x batch_size x output_dim
     float* d_state_error;    // seq_len x batch_size x state_dim
-    float* d_state_outputs;  // seq_len x batch_size x state_dim
+    float* d_X_outer;        // seq_len x batch_size x (input_dim * input_dim) (outer products)
     
     // cuBLAS handle
     cublasHandle_t cublas_handle;
@@ -74,8 +74,7 @@ typedef struct {
 } SSM;
 
 // CUDA kernel prototypes
-__global__ void swish_forward_kernel_ssm(float* output, float* input, int size);
-__global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size);
+__global__ void compute_outer_products_kernel(float* X_outer, const float* X, int batch_size, int input_dim);
 __global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y, int size);
 __global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int batch_size);
 
