@@ -29,7 +29,7 @@ static float evaluate_synthetic_function(int num_terms, const float* coefficient
             case 3: term_value = coefficient * expf(-powf(x[input_idx1], 2)); break;
             case 4: term_value = coefficient * logf(fabsf(x[input_idx1]) + 1.0f); break;
             case 5: term_value = coefficient * powf(x[input_idx1], 2) * x[input_idx2]; break;
-            case 6: term_value = coefficient * sinhf(x[input_idx1] - x[input_idx2]); break;
+            case 6: term_value = coefficient * sinhf(x[input_idx1] * x[input_idx2]); break;
             case 7: term_value = coefficient * x[input_idx1] * sinf(x[input_idx2] * M_PI); break;
         }
         

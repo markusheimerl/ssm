@@ -33,34 +33,35 @@
 #endif
 
 typedef struct {
-    // Device pointers for state space matrices
-    float* d_A;           // state_dim x state_dim (state transition)
-    float* d_W_B;         // state_dim x (input_dim * input_dim) (weights for input-dependent B)
-    float* d_C;           // output_dim x state_dim (state to output)
-    float* d_D;           // output_dim x input_dim (input to output)
+    // State space matrices
+    float* d_A;           // state_dim x state_dim (temporal transition)
+    float* d_W_B;         // state_dim x (input_dim²) (input bilinear weights)
+    float* d_W_C;         // output_dim x (state_dim²) (state bilinear weights)
+    float* d_D;           // output_dim x input_dim (input skip connection)
     
-    // Device pointers for gradients
-    float* d_A_grad;      // state_dim x state_dim
-    float* d_W_B_grad;    // state_dim x (input_dim * input_dim)
-    float* d_C_grad;      // output_dim x state_dim
-    float* d_D_grad;      // output_dim x input_dim
+    // Gradients
+    float* d_A_grad;
+    float* d_W_B_grad;
+    float* d_W_C_grad;
+    float* d_D_grad;
     
-    // Device pointers for Adam parameters
+    // Adam optimizer state
     float* d_A_m; float* d_A_v;
     float* d_W_B_m; float* d_W_B_v;
-    float* d_C_m; float* d_C_v;
+    float* d_W_C_m; float* d_W_C_v;
     float* d_D_m; float* d_D_v;
     
     float beta1, beta2, epsilon;
     int t;
     float weight_decay;
     
-    // Device pointers for helper arrays (time-major format)
+    // Working buffers
     float* d_states;          // seq_len x batch_size x state_dim
     float* d_predictions;     // seq_len x batch_size x output_dim
     float* d_error;          // seq_len x batch_size x output_dim
     float* d_state_error;    // seq_len x batch_size x state_dim
-    float* d_X_outer;        // seq_len x batch_size x (input_dim * input_dim) (outer products)
+    float* d_X_outer;        // seq_len x batch_size x (input_dim²)
+    float* d_H_outer;        // seq_len x batch_size x (state_dim²)
     
     // cuBLAS handle
     cublasHandle_t cublas_handle;
@@ -74,9 +75,10 @@ typedef struct {
 } SSM;
 
 // CUDA kernel prototypes
-__global__ void compute_outer_products_kernel(float* X_outer, const float* X, int batch_size, int input_dim);
 __global__ void calc_error_kernel_ssm(float* error, float* predictions, float* y, int size);
-__global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int batch_size);
+__global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v, 
+                                        float beta1, float beta2, float epsilon, float learning_rate, 
+                                        float weight_decay, float alpha_t, int size, int batch_size);
 
 // Function prototypes
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
