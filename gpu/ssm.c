@@ -122,8 +122,8 @@ void reset_state_ssm(SSM* ssm) {
 __global__ void swish_forward_kernel_ssm(float* output, float* input, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        float z = input[idx];
-        output[idx] = z / (1.0f + expf(-z));
+        float h = input[idx];
+        output[idx] = h / (1.0f + expf(-h));
     }
 }
 
@@ -131,9 +131,9 @@ __global__ void swish_forward_kernel_ssm(float* output, float* input, int size) 
 __global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        float z = input[idx];
-        float sigmoid = 1.0f / (1.0f + expf(-z));
-        grad_input[idx] = grad_output[idx] * (sigmoid + z * sigmoid * (1.0f - sigmoid));
+        float h = input[idx];
+        float sigmoid = 1.0f / (1.0f + expf(-h));
+        grad_input[idx] = grad_output[idx] * (sigmoid + h * sigmoid * (1.0f - sigmoid));
     }
 }
 
@@ -144,40 +144,40 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
     const float beta_add = 1.0f;
     
     // Get pointers to current timestep data (time-major format)
-    float* d_Z_t = &ssm->d_layer1_preact[timestep * ssm->batch_size * ssm->state_dim];
-    float* d_H_t = &ssm->d_layer1_output[timestep * ssm->batch_size * ssm->state_dim];
+    float* d_H_t = &ssm->d_layer1_preact[timestep * ssm->batch_size * ssm->state_dim];
+    float* d_S_t = &ssm->d_layer1_output[timestep * ssm->batch_size * ssm->state_dim];
     float* d_Y_t = &ssm->d_layer2_output[timestep * ssm->batch_size * ssm->output_dim];
     
-    // Z_t = X_t B^T
+    // H_t = X_t B^T
     CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                             CUBLAS_OP_T, CUBLAS_OP_N,
                             ssm->state_dim, ssm->batch_size, ssm->input_dim,
                             &alpha, ssm->d_B, ssm->input_dim,
                             d_X_t, ssm->input_dim,
-                            &beta, d_Z_t, ssm->state_dim));
+                            &beta, d_H_t, ssm->state_dim));
     
-    // Z_t = Z_t + Z_{t-1} A^T
+    // H_t = H_t + H_{t-1} A^T
     if (timestep > 0) {
-        float* d_Z_prev = &ssm->d_layer1_preact[(timestep-1) * ssm->batch_size * ssm->state_dim];
+        float* d_H_prev = &ssm->d_layer1_preact[(timestep-1) * ssm->batch_size * ssm->state_dim];
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 ssm->state_dim, ssm->batch_size, ssm->state_dim,
                                 &alpha, ssm->d_A, ssm->state_dim,
-                                d_Z_prev, ssm->state_dim,
-                                &beta_add, d_Z_t, ssm->state_dim));
+                                d_H_prev, ssm->state_dim,
+                                &beta_add, d_H_t, ssm->state_dim));
     }
     
-    // H_t = Z_t * swish(Z_t)
+    // S_t = H_tσ(H_t)
     int block_size = 256;
     int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
-    swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_H_t, d_Z_t, ssm->batch_size * ssm->state_dim);
+    swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_S_t, d_H_t, ssm->batch_size * ssm->state_dim);
     
-    // Y_t = H_t C^T
+    // Y_t = S_t C^T
     CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                             CUBLAS_OP_T, CUBLAS_OP_N,
                             ssm->output_dim, ssm->batch_size, ssm->state_dim,
                             &alpha, ssm->d_C, ssm->state_dim,
-                            d_H_t, ssm->state_dim,
+                            d_S_t, ssm->state_dim,
                             &beta, d_Y_t, ssm->output_dim));
     
     // Y_t = Y_t + X_t D^T
@@ -224,16 +224,16 @@ void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
     const float beta_add = 1.0f;
     
     // Get pointers to current timestep data
-    float* d_Z_t = &ssm->d_layer1_preact[timestep * ssm->batch_size * ssm->state_dim];
-    float* d_H_t = &ssm->d_layer1_output[timestep * ssm->batch_size * ssm->state_dim];
+    float* d_H_t = &ssm->d_layer1_preact[timestep * ssm->batch_size * ssm->state_dim];
+    float* d_S_t = &ssm->d_layer1_output[timestep * ssm->batch_size * ssm->state_dim];
     float* d_error_output_t = &ssm->d_error_output[timestep * ssm->batch_size * ssm->output_dim];
     float* d_error_hidden_t = &ssm->d_error_hidden[timestep * ssm->batch_size * ssm->state_dim];
     
-    // ∂L/∂C += (∂L/∂Y_t)^T H_t
+    // ∂L/∂C += (∂L/∂Y_t)^T S_t
     CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                             CUBLAS_OP_N, CUBLAS_OP_T,
                             ssm->state_dim, ssm->output_dim, ssm->batch_size,
-                            &alpha, d_H_t, ssm->state_dim,
+                            &alpha, d_S_t, ssm->state_dim,
                             d_error_output_t, ssm->output_dim,
                             &beta_add, ssm->d_C_grad, ssm->state_dim));
     
@@ -245,7 +245,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                             d_error_output_t, ssm->output_dim,
                             &beta_add, ssm->d_D_grad, ssm->input_dim));
     
-    // ∂L/∂H_t = (∂L/∂Y_t) C
+    // ∂L/∂S_t = (∂L/∂Y_t) C
     CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                             CUBLAS_OP_N, CUBLAS_OP_N,
                             ssm->state_dim, ssm->batch_size, ssm->output_dim,
@@ -253,12 +253,12 @@ void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                             d_error_output_t, ssm->output_dim,
                             &beta, d_error_hidden_t, ssm->state_dim));
     
-    // ∂L/∂Z_t = ∂L/∂H_t ⊙ [σ(Z_t) + Z_t σ(Z_t)(1-σ(Z_t))]
+    // ∂L/∂H_t = ∂L/∂S_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))]
     int block_size = 256;
     int num_blocks = (ssm->batch_size * ssm->state_dim + block_size - 1) / block_size;
-    swish_backward_kernel_ssm<<<num_blocks, block_size>>>(d_error_hidden_t, d_error_hidden_t, d_Z_t, ssm->batch_size * ssm->state_dim);
+    swish_backward_kernel_ssm<<<num_blocks, block_size>>>(d_error_hidden_t, d_error_hidden_t, d_H_t, ssm->batch_size * ssm->state_dim);
     
-    // ∂L/∂B += (∂L/∂Z_t)^T X_t
+    // ∂L/∂B += (∂L/∂H_t)^T X_t
     CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                             CUBLAS_OP_N, CUBLAS_OP_T,
                             ssm->input_dim, ssm->state_dim, ssm->batch_size,
@@ -268,18 +268,18 @@ void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
     
     // Propagate error to previous timestep
     if (timestep > 0) {
-        float* d_Z_prev = &ssm->d_layer1_preact[(timestep-1) * ssm->batch_size * ssm->state_dim];
+        float* d_H_prev = &ssm->d_layer1_preact[(timestep-1) * ssm->batch_size * ssm->state_dim];
         float* d_error_hidden_prev = &ssm->d_error_hidden[(timestep-1) * ssm->batch_size * ssm->state_dim];
         
-        // ∂L/∂A += (∂L/∂Z_t)^T Z_{t-1}
+        // ∂L/∂A += (∂L/∂H_t)^T H_{t-1}
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_N, CUBLAS_OP_T,
                                 ssm->state_dim, ssm->state_dim, ssm->batch_size,
-                                &alpha, d_Z_prev, ssm->state_dim,
+                                &alpha, d_H_prev, ssm->state_dim,
                                 d_error_hidden_t, ssm->state_dim,
                                 &beta_add, ssm->d_A_grad, ssm->state_dim));
         
-        // ∂L/∂Z_{t-1} += (∂L/∂Z_t) A
+        // ∂L/∂H_{t-1} += (∂L/∂H_t) A
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
                                 CUBLAS_OP_N, CUBLAS_OP_N,
                                 ssm->state_dim, ssm->batch_size, ssm->state_dim,
@@ -297,13 +297,13 @@ __global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, fl
     if (idx < size) {
         float g = grad[idx] / total_samples;
         
-        // m = β₁m + (1-β₁)g
+        // m = β₁m + (1-β₁)(∂L/∂W)
         m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
-        // v = β₂v + (1-β₂)g²
+        // v = β₂v + (1-β₂)(∂L/∂W)²
         v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
         
         float update = alpha_t * m[idx] / (sqrtf(v[idx]) + epsilon);
-        // W = (1-λη)W - η·m̂/√v̂
+        // W = (1-λη)W - η·(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
         weight[idx] = weight[idx] * (1.0f - learning_rate * weight_decay) - update;
     }
 }

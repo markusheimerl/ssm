@@ -93,36 +93,36 @@ void reset_state_ssm(SSM* ssm) {
 // Forward pass for single timestep
 void forward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
     // Get pointers to current timestep data (time-major format)
-    float* Z_t = &ssm->layer1_preact[timestep * ssm->batch_size * ssm->state_dim];
-    float* H_t = &ssm->layer1_output[timestep * ssm->batch_size * ssm->state_dim];
+    float* H_t = &ssm->layer1_preact[timestep * ssm->batch_size * ssm->state_dim];
+    float* S_t = &ssm->layer1_output[timestep * ssm->batch_size * ssm->state_dim];
     float* Y_t = &ssm->layer2_output[timestep * ssm->batch_size * ssm->output_dim];
     
-    // Z_t = X_t B^T
+    // H_t = X_t B^T
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 ssm->batch_size, ssm->state_dim, ssm->input_dim,
                 1.0f, X_t, ssm->input_dim,
                 ssm->B, ssm->input_dim,
-                0.0f, Z_t, ssm->state_dim);
+                0.0f, H_t, ssm->state_dim);
     
-    // Z_t = Z_t + Z_{t-1} A^T
+    // H_t = H_t + H_{t-1} A^T
     if (timestep > 0) {
-        float* Z_prev = &ssm->layer1_preact[(timestep-1) * ssm->batch_size * ssm->state_dim];
+        float* H_prev = &ssm->layer1_preact[(timestep-1) * ssm->batch_size * ssm->state_dim];
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                     ssm->batch_size, ssm->state_dim, ssm->state_dim,
-                    1.0f, Z_prev, ssm->state_dim,
+                    1.0f, H_prev, ssm->state_dim,
                     ssm->A, ssm->state_dim,
-                    1.0f, Z_t, ssm->state_dim);
+                    1.0f, H_t, ssm->state_dim);
     }
     
-    // H_t = Z_t * swish(Z_t)
+    // S_t = H_tσ(H_t)
     for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
-        H_t[i] = Z_t[i] / (1.0f + expf(-Z_t[i]));
+        S_t[i] = H_t[i] / (1.0f + expf(-H_t[i]));
     }
     
-    // Y_t = H_t C^T
+    // Y_t = S_t C^T
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 ssm->batch_size, ssm->output_dim, ssm->state_dim,
-                1.0f, H_t, ssm->state_dim,
+                1.0f, S_t, ssm->state_dim,
                 ssm->C, ssm->state_dim,
                 0.0f, Y_t, ssm->output_dim);
     
@@ -156,16 +156,16 @@ void zero_gradients_ssm(SSM* ssm) {
 // Backward pass for single timestep
 void backward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
     // Get pointers to current timestep data
-    float* Z_t = &ssm->layer1_preact[timestep * ssm->batch_size * ssm->state_dim];
-    float* H_t = &ssm->layer1_output[timestep * ssm->batch_size * ssm->state_dim];
+    float* H_t = &ssm->layer1_preact[timestep * ssm->batch_size * ssm->state_dim];
+    float* S_t = &ssm->layer1_output[timestep * ssm->batch_size * ssm->state_dim];
     float* error_output_t = &ssm->error_output[timestep * ssm->batch_size * ssm->output_dim];
     float* error_hidden_t = &ssm->error_hidden[timestep * ssm->batch_size * ssm->state_dim];
     
-    // ∂L/∂C += (∂L/∂Y_t)^T H_t
+    // ∂L/∂C += (∂L/∂Y_t)^T S_t
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                 ssm->output_dim, ssm->state_dim, ssm->batch_size,
                 1.0f, error_output_t, ssm->output_dim,
-                H_t, ssm->state_dim,
+                S_t, ssm->state_dim,
                 1.0f, ssm->C_grad, ssm->state_dim);
     
     // ∂L/∂D += (∂L/∂Y_t)^T X_t
@@ -175,21 +175,21 @@ void backward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
                 X_t, ssm->input_dim,
                 1.0f, ssm->D_grad, ssm->input_dim);
     
-    // ∂L/∂H_t = (∂L/∂Y_t) C
+    // ∂L/∂S_t = (∂L/∂Y_t) C
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 ssm->batch_size, ssm->state_dim, ssm->output_dim,
                 1.0f, error_output_t, ssm->output_dim,
                 ssm->C, ssm->state_dim,
                 0.0f, error_hidden_t, ssm->state_dim);
     
-    // ∂L/∂Z_t = ∂L/∂H_t ⊙ [σ(Z_t) + Z_t σ(Z_t)(1-σ(Z_t))]
+    // ∂L/∂H_t = ∂L/∂S_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))]
     for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
-        float z = Z_t[i];
-        float sigmoid = 1.0f / (1.0f + expf(-z));
-        error_hidden_t[i] *= sigmoid + z * sigmoid * (1.0f - sigmoid);
+        float h = H_t[i];
+        float sigmoid = 1.0f / (1.0f + expf(-h));
+        error_hidden_t[i] *= sigmoid + h * sigmoid * (1.0f - sigmoid);
     }
     
-    // ∂L/∂B += (∂L/∂Z_t)^T X_t
+    // ∂L/∂B += (∂L/∂H_t)^T X_t
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                 ssm->state_dim, ssm->input_dim, ssm->batch_size,
                 1.0f, error_hidden_t, ssm->state_dim,
@@ -198,17 +198,17 @@ void backward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
     
     // Propagate error to previous timestep
     if (timestep > 0) {
-        float* Z_prev = &ssm->layer1_preact[(timestep-1) * ssm->batch_size * ssm->state_dim];
+        float* H_prev = &ssm->layer1_preact[(timestep-1) * ssm->batch_size * ssm->state_dim];
         float* error_hidden_prev = &ssm->error_hidden[(timestep-1) * ssm->batch_size * ssm->state_dim];
         
-        // ∂L/∂A += (∂L/∂Z_t)^T Z_{t-1}
+        // ∂L/∂A += (∂L/∂H_t)^T H_{t-1}
         cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                     ssm->state_dim, ssm->state_dim, ssm->batch_size,
                     1.0f, error_hidden_t, ssm->state_dim,
-                    Z_prev, ssm->state_dim,
+                    H_prev, ssm->state_dim,
                     1.0f, ssm->A_grad, ssm->state_dim);
         
-        // ∂L/∂Z_{t-1} += (∂L/∂Z_t) A
+        // ∂L/∂H_{t-1} += (∂L/∂H_t) A
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                     ssm->batch_size, ssm->state_dim, ssm->state_dim,
                     1.0f, error_hidden_t, ssm->state_dim,
@@ -231,10 +231,13 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     for (int i = 0; i < ssm->state_dim * ssm->state_dim; i++) {
         float grad = ssm->A_grad[i] / total_samples;
         
+        // m = β₁m + (1-β₁)(∂L/∂A)
         ssm->A_m[i] = ssm->beta1 * ssm->A_m[i] + (1.0f - ssm->beta1) * grad;
+        // v = β₂v + (1-β₂)(∂L/∂A)²
         ssm->A_v[i] = ssm->beta2 * ssm->A_v[i] + (1.0f - ssm->beta2) * grad * grad;
         
         float update = alpha_t * ssm->A_m[i] / (sqrtf(ssm->A_v[i]) + ssm->epsilon);
+        // A = (1-λη)A - η·(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
         ssm->A[i] = ssm->A[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
     }
     
@@ -242,10 +245,13 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     for (int i = 0; i < ssm->state_dim * ssm->input_dim; i++) {
         float grad = ssm->B_grad[i] / total_samples;
         
+        // m = β₁m + (1-β₁)(∂L/∂B)
         ssm->B_m[i] = ssm->beta1 * ssm->B_m[i] + (1.0f - ssm->beta1) * grad;
+        // v = β₂v + (1-β₂)(∂L/∂B)²
         ssm->B_v[i] = ssm->beta2 * ssm->B_v[i] + (1.0f - ssm->beta2) * grad * grad;
         
         float update = alpha_t * ssm->B_m[i] / (sqrtf(ssm->B_v[i]) + ssm->epsilon);
+        // B = (1-λη)B - η·(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
         ssm->B[i] = ssm->B[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
     }
     
@@ -253,10 +259,13 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     for (int i = 0; i < ssm->output_dim * ssm->state_dim; i++) {
         float grad = ssm->C_grad[i] / total_samples;
         
+        // m = β₁m + (1-β₁)(∂L/∂C)
         ssm->C_m[i] = ssm->beta1 * ssm->C_m[i] + (1.0f - ssm->beta1) * grad;
+        // v = β₂v + (1-β₂)(∂L/∂C)²
         ssm->C_v[i] = ssm->beta2 * ssm->C_v[i] + (1.0f - ssm->beta2) * grad * grad;
         
         float update = alpha_t * ssm->C_m[i] / (sqrtf(ssm->C_v[i]) + ssm->epsilon);
+        // C = (1-λη)C - η·(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
         ssm->C[i] = ssm->C[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
     }
     
@@ -264,10 +273,13 @@ void update_weights_ssm(SSM* ssm, float learning_rate) {
     for (int i = 0; i < ssm->output_dim * ssm->input_dim; i++) {
         float grad = ssm->D_grad[i] / total_samples;
         
+        // m = β₁m + (1-β₁)(∂L/∂D)
         ssm->D_m[i] = ssm->beta1 * ssm->D_m[i] + (1.0f - ssm->beta1) * grad;
+        // v = β₂v + (1-β₂)(∂L/∂D)²
         ssm->D_v[i] = ssm->beta2 * ssm->D_v[i] + (1.0f - ssm->beta2) * grad * grad;
         
         float update = alpha_t * ssm->D_m[i] / (sqrtf(ssm->D_v[i]) + ssm->epsilon);
+        // D = (1-λη)D - η·(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
         ssm->D[i] = ssm->D[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
     }
 }
