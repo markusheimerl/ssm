@@ -251,7 +251,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                             ssm->state_dim, ssm->batch_size, ssm->output_dim,
                             &alpha, ssm->d_C, ssm->state_dim,
                             d_error_output_t, ssm->output_dim,
-                            &beta_add, d_error_hidden_t, ssm->state_dim));
+                            &beta, d_error_hidden_t, ssm->state_dim));
     
     // ∂L/∂Z_t = ∂L/∂H_t ⊙ [σ(Z_t) + Z_t σ(Z_t)(1-σ(Z_t))]
     int block_size = 256;

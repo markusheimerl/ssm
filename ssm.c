@@ -151,7 +151,6 @@ void zero_gradients_ssm(SSM* ssm) {
     memset(ssm->B_grad, 0, ssm->state_dim * ssm->input_dim * sizeof(float));
     memset(ssm->C_grad, 0, ssm->output_dim * ssm->state_dim * sizeof(float));
     memset(ssm->D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(float));
-    memset(ssm->error_hidden, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float));
 }
 
 // Backward pass for single timestep
@@ -181,7 +180,7 @@ void backward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
                 ssm->batch_size, ssm->state_dim, ssm->output_dim,
                 1.0f, error_output_t, ssm->output_dim,
                 ssm->C, ssm->state_dim,
-                1.0f, error_hidden_t, ssm->state_dim);
+                0.0f, error_hidden_t, ssm->state_dim);
     
     // ∂L/∂Z_t = ∂L/∂H_t ⊙ [σ(Z_t) + Z_t σ(Z_t)(1-σ(Z_t))]
     for (int i = 0; i < ssm->batch_size * ssm->state_dim; i++) {
