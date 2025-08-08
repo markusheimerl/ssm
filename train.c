@@ -7,26 +7,14 @@
 #include "ssm.h"
 
 // Reshape data from [batch][time][feature] to [time][batch][feature]
-void reshape_data_for_batch_processing(float* X, float* y, 
-                                     float** X_reshaped, float** y_reshaped,
-                                     int num_sequences, int seq_len, 
-                                     int input_dim, int output_dim) {
-    // Reshape to: seq_len tensors of size (batch_size x input_dim/output_dim)
+void reshape_data_for_batch_processing(float* X, float* y, float** X_reshaped, float** y_reshaped, int num_sequences, int seq_len, int input_dim, int output_dim) {
     *X_reshaped = (float*)malloc(seq_len * num_sequences * input_dim * sizeof(float));
     *y_reshaped = (float*)malloc(seq_len * num_sequences * output_dim * sizeof(float));
     
     for (int t = 0; t < seq_len; t++) {
         for (int b = 0; b < num_sequences; b++) {
-            // Original layout: [seq][time][feature]
-            int orig_x_idx = b * seq_len * input_dim + t * input_dim;
-            int orig_y_idx = b * seq_len * output_dim + t * output_dim;
-            
-            // New layout: [time][seq][feature] 
-            int new_x_idx = t * num_sequences * input_dim + b * input_dim;
-            int new_y_idx = t * num_sequences * output_dim + b * output_dim;
-            
-            memcpy(&(*X_reshaped)[new_x_idx], &X[orig_x_idx], input_dim * sizeof(float));
-            memcpy(&(*y_reshaped)[new_y_idx], &y[orig_y_idx], output_dim * sizeof(float));
+            memcpy(&(*X_reshaped)[t * num_sequences * input_dim + b * input_dim], &X[b * seq_len * input_dim + t * input_dim], input_dim * sizeof(float));
+            memcpy(&(*y_reshaped)[t * num_sequences * output_dim + b * output_dim], &y[b * seq_len * output_dim + t * output_dim], output_dim * sizeof(float));
         }
     }
 }
@@ -49,8 +37,7 @@ int main() {
     
     // Reshape data for batch processing
     float *X_reshaped, *y_reshaped;
-    reshape_data_for_batch_processing(X, y, &X_reshaped, &y_reshaped,
-                                    num_sequences, seq_len, input_dim, output_dim);
+    reshape_data_for_batch_processing(X, y, &X_reshaped, &y_reshaped, num_sequences, seq_len, input_dim, output_dim);
     
     // Initialize state space model
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
@@ -81,7 +68,10 @@ int main() {
 
         // Backward pass
         zero_gradients_ssm(ssm);
-        backward_pass_ssm(ssm, X_reshaped);
+        for (int t = seq_len - 1; t >= 0; t--) {
+            float* X_t = X_reshaped + t * batch_size * input_dim;
+            backward_pass_ssm(ssm, X_t, t);
+        }
         
         // Update weights
         update_weights_ssm(ssm, learning_rate);
@@ -90,10 +80,8 @@ int main() {
     // Get timestamp for filenames
     char model_fname[64], data_fname[64];
     time_t now = time(NULL);
-    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_model.bin", 
-             localtime(&now));
-    strftime(data_fname, sizeof(data_fname), "%Y%m%d_%H%M%S_data.csv", 
-             localtime(&now));
+    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_model.bin", localtime(&now));
+    strftime(data_fname, sizeof(data_fname), "%Y%m%d_%H%M%S_data.csv", localtime(&now));
 
     // Save model and data with timestamped filenames
     save_ssm(ssm, model_fname);
@@ -136,7 +124,7 @@ int main() {
         for (int t = 0; t < seq_len; t++) {
             for (int b = 0; b < num_sequences; b++) {
                 int idx = t * num_sequences * output_dim + b * output_dim + i;
-                float diff_res = y_reshaped[idx] - loaded_ssm->predictions[idx];
+                float diff_res = y_reshaped[idx] - loaded_ssm->layer2_output[idx];
                 float diff_tot = y_reshaped[idx] - y_mean;
                 ss_res += diff_res * diff_res;
                 ss_tot += diff_tot * diff_tot;
@@ -156,7 +144,7 @@ int main() {
         for (int t = 0; t < 10; t++) {
             // First sequence (b=0) in reshaped format
             int idx = t * num_sequences * output_dim + 0 * output_dim + i;
-            float pred = loaded_ssm->predictions[idx];
+            float pred = loaded_ssm->layer2_output[idx];
             float actual = y_reshaped[idx];
             float diff = pred - actual;
             printf("t=%d\t\t%8.3f\t%8.3f\t%8.3f\n", t, pred, actual, diff);
@@ -167,7 +155,7 @@ int main() {
         for (int t = 0; t < seq_len; t++) {
             for (int b = 0; b < num_sequences; b++) {
                 int idx = t * num_sequences * output_dim + b * output_dim + i;
-                mae += fabs(loaded_ssm->predictions[idx] - y_reshaped[idx]);
+                mae += fabs(loaded_ssm->layer2_output[idx] - y_reshaped[idx]);
             }
         }
         mae /= total_samples;
