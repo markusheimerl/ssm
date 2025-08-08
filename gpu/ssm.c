@@ -1,7 +1,7 @@
 #include "ssm.h"
 
 // Initialize the network with configurable dimensions
-SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size) {
+SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size, cublasHandle_t cublas_handle) {
     SSM* ssm = (SSM*)malloc(sizeof(SSM));
     
     // Store dimensions
@@ -19,8 +19,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->weight_decay = 0.01f;
     
     // Initialize cuBLAS
-    CHECK_CUBLAS(cublasCreate(&ssm->cublas_handle));
-    CHECK_CUBLAS(cublasSetMathMode(ssm->cublas_handle, CUBLAS_TENSOR_OP_MATH));
+    ssm->cublas_handle = cublas_handle;
     
     // Allocate host memory for weights (local variables)
     float* A = (float*)malloc(state_dim * state_dim * sizeof(float));
@@ -109,10 +108,6 @@ void free_ssm(SSM* ssm) {
     cudaFree(ssm->d_D_m); cudaFree(ssm->d_D_v);
     cudaFree(ssm->d_layer1_preact); cudaFree(ssm->d_layer1_output); cudaFree(ssm->d_layer2_output);
     cudaFree(ssm->d_error_output); cudaFree(ssm->d_error_hidden);
-    
-    // Destroy cuBLAS handle
-    cublasDestroy(ssm->cublas_handle);
-    
     free(ssm);
 }
 
@@ -438,7 +433,7 @@ void save_ssm(SSM* ssm, const char* filename) {
 }
 
 // Function to load model weights from binary file
-SSM* load_ssm(const char* filename, int custom_batch_size) {
+SSM* load_ssm(const char* filename, int custom_batch_size, cublasHandle_t cublas_handle) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
         printf("Error opening file for reading: %s\n", filename);
@@ -457,7 +452,7 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
     
     // Initialize network
-    SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
+    SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size, cublas_handle);
     
     // Allocate temporary host memory for weights
     float* A = (float*)malloc(state_dim * state_dim * sizeof(float));

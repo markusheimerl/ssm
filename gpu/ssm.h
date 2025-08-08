@@ -84,7 +84,7 @@ __global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output,
 __global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int total_samples);
 
 // Function prototypes
-SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size);
+SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size, cublasHandle_t cublas_handle);
 void free_ssm(SSM* ssm);
 void reset_state_ssm(SSM* ssm);
 void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep);
@@ -93,6 +93,6 @@ void zero_gradients_ssm(SSM* ssm);
 void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep);
 void update_weights_ssm(SSM* ssm, float learning_rate);
 void save_ssm(SSM* ssm, const char* filename);
-SSM* load_ssm(const char* filename, int custom_batch_size);
+SSM* load_ssm(const char* filename, int custom_batch_size, cublasHandle_t cublas_handle);
 
 #endif

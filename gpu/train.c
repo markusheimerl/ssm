@@ -21,6 +21,11 @@ void reshape_data_for_batch_processing(float* X, float* y, float** X_reshaped, f
 int main() {
     srand(time(NULL));
 
+    // Initialize cuBLAS handle
+    cublasHandle_t cublas_handle;
+    CHECK_CUBLAS(cublasCreate(&cublas_handle));
+    CHECK_CUBLAS(cublasSetMathMode(cublas_handle, CUBLAS_TENSOR_OP_MATH));
+
     // Parameters
     const int input_dim = 16;
     const int state_dim = 128;
@@ -45,7 +50,7 @@ int main() {
     CHECK_CUDA(cudaMemcpy(d_y, y_reshaped, seq_len * batch_size * output_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     // Initialize state space model
-    SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
+    SSM* ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size, cublas_handle);
     
     // Training parameters
     const int num_epochs = 3000;
@@ -96,7 +101,7 @@ int main() {
     printf("\nVerifying saved model...\n");
 
     // Load the model back with original batch_size
-    SSM* loaded_ssm = load_ssm(model_fname, batch_size);
+    SSM* loaded_ssm = load_ssm(model_fname, batch_size, cublas_handle);
     
     // Forward pass with loaded model
     reset_state_ssm(loaded_ssm);
@@ -181,6 +186,7 @@ int main() {
     CHECK_CUDA(cudaFree(d_y));
     free_ssm(ssm);
     free_ssm(loaded_ssm);
+    CHECK_CUBLAS(cublasDestroy(cublas_handle));
     
     return 0;
 }
