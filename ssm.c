@@ -85,7 +85,6 @@ void free_ssm(SSM* ssm) {
 
 // Reset state for new sequence
 void reset_state_ssm(SSM* ssm) {
-    // Zero all states
     memset(ssm->layer1_preact, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float));
     memset(ssm->layer1_output, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(float));
     memset(ssm->layer2_output, 0, ssm->seq_len * ssm->batch_size * ssm->output_dim * sizeof(float));
