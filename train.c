@@ -81,7 +81,10 @@ int main() {
 
         // Backward pass
         zero_gradients_ssm(ssm);
-        backward_pass_ssm(ssm, X_reshaped);
+        for (int t = seq_len - 1; t >= 0; t--) {
+            float* X_t = X_reshaped + t * batch_size * input_dim;
+            backward_pass_ssm(ssm, X_t, t);
+        }
         
         // Update weights
         update_weights_ssm(ssm, learning_rate);
@@ -136,7 +139,7 @@ int main() {
         for (int t = 0; t < seq_len; t++) {
             for (int b = 0; b < num_sequences; b++) {
                 int idx = t * num_sequences * output_dim + b * output_dim + i;
-                float diff_res = y_reshaped[idx] - loaded_ssm->predictions[idx];
+                float diff_res = y_reshaped[idx] - loaded_ssm->layer2_output[idx];
                 float diff_tot = y_reshaped[idx] - y_mean;
                 ss_res += diff_res * diff_res;
                 ss_tot += diff_tot * diff_tot;
@@ -156,7 +159,7 @@ int main() {
         for (int t = 0; t < 10; t++) {
             // First sequence (b=0) in reshaped format
             int idx = t * num_sequences * output_dim + 0 * output_dim + i;
-            float pred = loaded_ssm->predictions[idx];
+            float pred = loaded_ssm->layer2_output[idx];
             float actual = y_reshaped[idx];
             float diff = pred - actual;
             printf("t=%d\t\t%8.3f\t%8.3f\t%8.3f\n", t, pred, actual, diff);
@@ -167,7 +170,7 @@ int main() {
         for (int t = 0; t < seq_len; t++) {
             for (int b = 0; b < num_sequences; b++) {
                 int idx = t * num_sequences * output_dim + b * output_dim + i;
-                mae += fabs(loaded_ssm->predictions[idx] - y_reshaped[idx]);
+                mae += fabs(loaded_ssm->layer2_output[idx] - y_reshaped[idx]);
             }
         }
         mae /= total_samples;
