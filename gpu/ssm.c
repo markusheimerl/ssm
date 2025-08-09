@@ -29,9 +29,9 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     
     // Initialize weights on host
     float scale_A = 0.5f / sqrtf(state_dim);
-    float scale_B = 1.0f / sqrtf(input_dim);
-    float scale_C = 1.0f / sqrtf(state_dim);
-    float scale_D = 1.0f / sqrtf(input_dim);
+    float scale_B = 1.5f / sqrtf(input_dim);
+    float scale_C = 1.5f / sqrtf(state_dim);
+    float scale_D = 1.5f / sqrtf(input_dim);
     
     for (int i = 0; i < state_dim * state_dim; i++) {
         A[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_A;
