@@ -21,7 +21,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     // Initialize cuBLAS
     ssm->cublas_handle = cublas_handle;
     
-    // Allocate host memory for weights (local variables)
+    // Allocate host memory for weights
     float* A = (float*)malloc(state_dim * state_dim * sizeof(float));
     float* B = (float*)malloc(state_dim * input_dim * sizeof(float));
     float* C = (float*)malloc(output_dim * state_dim * sizeof(float));
