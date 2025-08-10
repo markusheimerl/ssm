@@ -34,19 +34,19 @@
 #endif
 
 typedef struct {
-    // Device pointers for state space matrices (FP16)
+    // Device pointers for state space matrices
     __half* d_A;           // state_dim x state_dim
     __half* d_B;           // state_dim x input_dim
     __half* d_C;           // output_dim x state_dim
     __half* d_D;           // output_dim x input_dim
     
-    // Device pointers for gradients (FP16)
+    // Device pointers for gradients
     __half* d_A_grad;      // state_dim x state_dim
     __half* d_B_grad;      // state_dim x input_dim
     __half* d_C_grad;      // output_dim x state_dim
     __half* d_D_grad;      // output_dim x input_dim
     
-    // Device pointers for Adam parameters (FP16)
+    // Device pointers for Adam parameters
     __half* d_A_m;  // First moment for A
     __half* d_A_v;  // Second moment for A
     __half* d_B_m;  // First moment for B
@@ -58,10 +58,10 @@ typedef struct {
     __half beta1;   // Exponential decay rate for first moment
     __half beta2;   // Exponential decay rate for second moment
     __half epsilon; // Small constant for numerical stability
-    int t;         // Time step
+    int t;          // Time step
     __half weight_decay; // Weight decay parameter for AdamW
     
-    // Device pointers for layer outputs and working buffers (FP16)
+    // Device pointers for layer outputs and working buffers
     __half* d_layer1_preact;   // seq_len x batch_size x state_dim
     __half* d_layer1_output;   // seq_len x batch_size x state_dim
     __half* d_layer2_output;   // seq_len x batch_size x output_dim

@@ -11,22 +11,23 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->seq_len = seq_len;
     ssm->batch_size = batch_size;
     
-    // Initialize Adam parameters (FP16)
+    // Initialize Adam parameters
     ssm->beta1 = __float2half(0.9f);
     ssm->beta2 = __float2half(0.999f);
-    ssm->epsilon = __float2half(1e-4f); // Larger epsilon for FP16
+    ssm->epsilon = __float2half(1e-8f);
     ssm->t = 0;
     ssm->weight_decay = __float2half(0.01f);
     
     // Initialize cuBLAS
     ssm->cublas_handle = cublas_handle;
     
-    // Initialize weights directly as FP16
+    // Allocate host memory for weights
     __half* A_fp16 = (__half*)malloc(state_dim * state_dim * sizeof(__half));
     __half* B_fp16 = (__half*)malloc(state_dim * input_dim * sizeof(__half));
     __half* C_fp16 = (__half*)malloc(output_dim * state_dim * sizeof(__half));
     __half* D_fp16 = (__half*)malloc(output_dim * input_dim * sizeof(__half));
     
+    // Initialize weights on host
     __half scale_A = __float2half(0.5f / sqrtf(state_dim));
     __half scale_B = __float2half(1.5f / sqrtf(input_dim));
     __half scale_C = __float2half(1.5f / sqrtf(state_dim));
@@ -48,7 +49,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
         D_fp16[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_D);
     }
     
-    // Allocate device memory for weights and gradients (FP16)
+    // Allocate device memory for weights and gradients
     CHECK_CUDA(cudaMalloc(&ssm->d_A, state_dim * state_dim * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&ssm->d_B, state_dim * input_dim * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&ssm->d_C, output_dim * state_dim * sizeof(__half)));
@@ -58,7 +59,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&ssm->d_C_grad, output_dim * state_dim * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&ssm->d_D_grad, output_dim * input_dim * sizeof(__half)));
     
-    // Allocate device memory for Adam parameters (FP16)
+    // Allocate device memory for Adam parameters
     CHECK_CUDA(cudaMalloc(&ssm->d_A_m, state_dim * state_dim * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&ssm->d_A_v, state_dim * state_dim * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&ssm->d_B_m, state_dim * input_dim * sizeof(__half)));
@@ -68,7 +69,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&ssm->d_D_m, output_dim * input_dim * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&ssm->d_D_v, output_dim * input_dim * sizeof(__half)));
     
-    // Allocate device memory for layer outputs and working buffers (FP16)
+    // Allocate device memory for layer outputs and working buffers
     CHECK_CUDA(cudaMalloc(&ssm->d_layer1_preact, seq_len * batch_size * state_dim * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&ssm->d_layer1_output, seq_len * batch_size * state_dim * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&ssm->d_layer2_output, seq_len * batch_size * output_dim * sizeof(__half)));
@@ -117,7 +118,7 @@ void reset_state_ssm(SSM* ssm) {
     CHECK_CUDA(cudaMemset(ssm->d_layer2_output, 0, ssm->seq_len * ssm->batch_size * ssm->output_dim * sizeof(__half)));
 }
 
-// CUDA kernel for Swish activation (FP16)
+// CUDA kernel for Swish activation
 __global__ void swish_forward_kernel_ssm(__half* output, __half* input, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -130,7 +131,7 @@ __global__ void swish_forward_kernel_ssm(__half* output, __half* input, int size
     }
 }
 
-// CUDA kernel for Swish derivative (FP16)
+// CUDA kernel for Swish derivative
 __global__ void swish_backward_kernel_ssm(__half* grad_input, __half* grad_output, __half* input, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -146,7 +147,7 @@ __global__ void swish_backward_kernel_ssm(__half* grad_input, __half* grad_outpu
     }
 }
 
-// CUDA kernel to compute error (FP16)
+// CUDA kernel to compute error
 __global__ void compute_error_kernel_ssm(__half* error, __half* pred, __half* target, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -154,7 +155,7 @@ __global__ void compute_error_kernel_ssm(__half* error, __half* pred, __half* ta
     }
 }
 
-// CUDA kernel for dot product reduction (FP16 to FP32 for final sum)
+// CUDA kernel for dot product reduction
 __global__ void dot_product_kernel_ssm(__half* input, float* output, int size) {
     extern __shared__ float sdata[];
     
@@ -435,7 +436,7 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(&ssm->seq_len, sizeof(int), 1, file);
     fwrite(&ssm->batch_size, sizeof(int), 1, file);
     
-    // Save matrices (FP16)
+    // Save matrices
     fwrite(A, sizeof(__half), ssm->state_dim * ssm->state_dim, file);
     fwrite(B, sizeof(__half), ssm->state_dim * ssm->input_dim, file);
     fwrite(C, sizeof(__half), ssm->output_dim * ssm->state_dim, file);
@@ -444,7 +445,7 @@ void save_ssm(SSM* ssm, const char* filename) {
     // Save Adam state
     fwrite(&ssm->t, sizeof(int), 1, file);
     
-    // Also save Adam state variables (FP16)
+    // Also save Adam state variables
     __half* A_m = (__half*)malloc(ssm->state_dim * ssm->state_dim * sizeof(__half));
     __half* A_v = (__half*)malloc(ssm->state_dim * ssm->state_dim * sizeof(__half));
     __half* B_m = (__half*)malloc(ssm->state_dim * ssm->input_dim * sizeof(__half));
