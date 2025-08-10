@@ -141,7 +141,6 @@ __global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output,
 void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
-    const float beta_add = 1.0f;
     
     // Get pointers to current timestep data (time-major format)
     float* d_H_t = &ssm->d_layer1_preact[timestep * ssm->batch_size * ssm->state_dim];
@@ -164,7 +163,7 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                                 ssm->state_dim, ssm->batch_size, ssm->state_dim,
                                 &alpha, ssm->d_A, ssm->state_dim,
                                 d_H_prev, ssm->state_dim,
-                                &beta_add, d_H_t, ssm->state_dim));
+                                &alpha, d_H_t, ssm->state_dim));
     }
     
     // S_t = H_tσ(H_t)
@@ -186,7 +185,7 @@ void forward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                             ssm->output_dim, ssm->batch_size, ssm->input_dim,
                             &alpha, ssm->d_D, ssm->input_dim,
                             d_X_t, ssm->input_dim,
-                            &beta_add, d_Y_t, ssm->output_dim));
+                            &alpha, d_Y_t, ssm->output_dim));
 }
 
 // Calculate loss
@@ -221,7 +220,6 @@ void zero_gradients_ssm(SSM* ssm) {
 void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
-    const float beta_add = 1.0f;
     
     // Get pointers to current timestep data
     float* d_H_t = &ssm->d_layer1_preact[timestep * ssm->batch_size * ssm->state_dim];
@@ -235,7 +233,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                             ssm->state_dim, ssm->output_dim, ssm->batch_size,
                             &alpha, d_S_t, ssm->state_dim,
                             d_error_output_t, ssm->output_dim,
-                            &beta_add, ssm->d_C_grad, ssm->state_dim));
+                            &alpha, ssm->d_C_grad, ssm->state_dim));
     
     // ∂L/∂D += (∂L/∂Y_t)^T X_t
     CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
@@ -243,7 +241,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                             ssm->input_dim, ssm->output_dim, ssm->batch_size,
                             &alpha, d_X_t, ssm->input_dim,
                             d_error_output_t, ssm->output_dim,
-                            &beta_add, ssm->d_D_grad, ssm->input_dim));
+                            &alpha, ssm->d_D_grad, ssm->input_dim));
     
     // ∂L/∂S_t = (∂L/∂Y_t) C
     CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
@@ -264,7 +262,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                             ssm->input_dim, ssm->state_dim, ssm->batch_size,
                             &alpha, d_X_t, ssm->input_dim,
                             d_error_hidden_t, ssm->state_dim,
-                            &beta_add, ssm->d_B_grad, ssm->input_dim));
+                            &alpha, ssm->d_B_grad, ssm->input_dim));
     
     // Propagate error to previous timestep
     if (timestep > 0) {
@@ -277,7 +275,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                                 ssm->state_dim, ssm->state_dim, ssm->batch_size,
                                 &alpha, d_H_prev, ssm->state_dim,
                                 d_error_hidden_t, ssm->state_dim,
-                                &beta_add, ssm->d_A_grad, ssm->state_dim));
+                                &alpha, ssm->d_A_grad, ssm->state_dim));
         
         // ∂L/∂H_{t-1} += (∂L/∂H_t) A
         CHECK_CUBLAS(cublasSgemm(ssm->cublas_handle,
@@ -285,7 +283,7 @@ void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
                                 ssm->state_dim, ssm->batch_size, ssm->state_dim,
                                 &alpha, ssm->d_A, ssm->state_dim,
                                 d_error_hidden_t, ssm->state_dim,
-                                &beta_add, d_error_hidden_prev, ssm->state_dim));
+                                &alpha, d_error_hidden_prev, ssm->state_dim));
     }
 }
 
