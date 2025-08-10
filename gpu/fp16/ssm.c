@@ -259,7 +259,6 @@ void zero_gradients_ssm(SSM* ssm) {
     CHECK_CUDA(cudaMemset(ssm->d_B_grad, 0, ssm->state_dim * ssm->input_dim * sizeof(__half)));
     CHECK_CUDA(cudaMemset(ssm->d_C_grad, 0, ssm->output_dim * ssm->state_dim * sizeof(__half)));
     CHECK_CUDA(cudaMemset(ssm->d_D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMemset(ssm->d_error_hidden, 0, ssm->seq_len * ssm->batch_size * ssm->state_dim * sizeof(__half)));
 }
 
 // Backward pass for single timestep
