@@ -5,10 +5,27 @@
 #include "../../data.h"
 #include "ssm.h"
 
-// Convert FP32 array to FP16
-void convert_fp32_to_fp16(float* src, __half* dst, int size) {
-    for (int i = 0; i < size; i++) {
-        dst[i] = __float2half(src[i]);
+// Reshape data from [batch][time][feature] to [time][batch][feature] and convert to FP16
+void reshape_and_convert_data_for_batch_processing(float* X, float* y, __half** X_reshaped_fp16, __half** y_reshaped_fp16, int num_sequences, int seq_len, int input_dim, int output_dim) {
+    *X_reshaped_fp16 = (__half*)malloc(seq_len * num_sequences * input_dim * sizeof(__half));
+    *y_reshaped_fp16 = (__half*)malloc(seq_len * num_sequences * output_dim * sizeof(__half));
+    
+    for (int t = 0; t < seq_len; t++) {
+        for (int b = 0; b < num_sequences; b++) {
+            // Convert X data
+            for (int i = 0; i < input_dim; i++) {
+                int src_idx = b * seq_len * input_dim + t * input_dim + i;
+                int dst_idx = t * num_sequences * input_dim + b * input_dim + i;
+                (*X_reshaped_fp16)[dst_idx] = __float2half(X[src_idx]);
+            }
+            
+            // Convert y data
+            for (int i = 0; i < output_dim; i++) {
+                int src_idx = b * seq_len * output_dim + t * output_dim + i;
+                int dst_idx = t * num_sequences * output_dim + b * output_dim + i;
+                (*y_reshaped_fp16)[dst_idx] = __float2half(y[src_idx]);
+            }
+        }
     }
 }
 
@@ -16,19 +33,6 @@ void convert_fp32_to_fp16(float* src, __half* dst, int size) {
 void convert_fp16_to_fp32(__half* src, float* dst, int size) {
     for (int i = 0; i < size; i++) {
         dst[i] = __half2float(src[i]);
-    }
-}
-
-// Reshape data from [batch][time][feature] to [time][batch][feature]
-void reshape_data_for_batch_processing(float* X, float* y, float** X_reshaped, float** y_reshaped, int num_sequences, int seq_len, int input_dim, int output_dim) {
-    *X_reshaped = (float*)malloc(seq_len * num_sequences * input_dim * sizeof(float));
-    *y_reshaped = (float*)malloc(seq_len * num_sequences * output_dim * sizeof(float));
-    
-    for (int t = 0; t < seq_len; t++) {
-        for (int b = 0; b < num_sequences; b++) {
-            memcpy(&(*X_reshaped)[t * num_sequences * input_dim + b * input_dim], &X[b * seq_len * input_dim + t * input_dim], input_dim * sizeof(float));
-            memcpy(&(*y_reshaped)[t * num_sequences * output_dim + b * output_dim], &y[b * seq_len * output_dim + t * output_dim], output_dim * sizeof(float));
-        }
     }
 }
 
@@ -52,15 +56,9 @@ int main() {
     float *X, *y;
     generate_synthetic_data(&X, &y, num_sequences, seq_len, input_dim, output_dim, -3.0f, 3.0f);
     
-    // Reshape data for batch processing (FP32)
-    float *X_reshaped, *y_reshaped;
-    reshape_data_for_batch_processing(X, y, &X_reshaped, &y_reshaped, num_sequences, seq_len, input_dim, output_dim);
-    
-    // Convert to FP16
-    __half *X_reshaped_fp16 = (__half*)malloc(seq_len * batch_size * input_dim * sizeof(__half));
-    __half *y_reshaped_fp16 = (__half*)malloc(seq_len * batch_size * output_dim * sizeof(__half));
-    convert_fp32_to_fp16(X_reshaped, X_reshaped_fp16, seq_len * batch_size * input_dim);
-    convert_fp32_to_fp16(y_reshaped, y_reshaped_fp16, seq_len * batch_size * output_dim);
+    // Reshape data for batch processing and convert to FP16
+    __half *X_reshaped_fp16, *y_reshaped_fp16;
+    reshape_and_convert_data_for_batch_processing(X, y, &X_reshaped_fp16, &y_reshaped_fp16, num_sequences, seq_len, input_dim, output_dim);
     
     // Allocate device memory for input and output and copy data (FP16)
     __half *d_X, *d_y;
@@ -142,6 +140,10 @@ int main() {
     CHECK_CUDA(cudaMemcpy(predictions_fp16, loaded_ssm->d_layer2_output, seq_len * batch_size * output_dim * sizeof(__half), cudaMemcpyDeviceToHost));
     convert_fp16_to_fp32(predictions_fp16, predictions, seq_len * batch_size * output_dim);
 
+    // Convert y_reshaped_fp16 back to FP32 for evaluation
+    float* y_reshaped = (float*)malloc(seq_len * batch_size * output_dim * sizeof(float));
+    convert_fp16_to_fp32(y_reshaped_fp16, y_reshaped, seq_len * batch_size * output_dim);
+
     // Calculate R² scores
     printf("\nR² scores:\n");
     int total_samples = num_sequences * seq_len;
@@ -201,10 +203,9 @@ int main() {
     // Cleanup
     free(X);
     free(y);
-    free(X_reshaped);
-    free(y_reshaped);
     free(X_reshaped_fp16);
     free(y_reshaped_fp16);
+    free(y_reshaped);
     free(predictions);
     free(predictions_fp16);
     CHECK_CUDA(cudaFree(d_X));

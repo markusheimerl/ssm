@@ -14,7 +14,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     // Initialize Adam parameters
     ssm->beta1 = __float2half(0.9f);
     ssm->beta2 = __float2half(0.999f);
-    ssm->epsilon = __float2half(1e-8f);
+    ssm->epsilon = __float2half(1e-4f);
     ssm->t = 0;
     ssm->weight_decay = __float2half(0.01f);
     
@@ -22,10 +22,10 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->cublas_handle = cublas_handle;
     
     // Allocate host memory for weights
-    __half* A_fp16 = (__half*)malloc(state_dim * state_dim * sizeof(__half));
-    __half* B_fp16 = (__half*)malloc(state_dim * input_dim * sizeof(__half));
-    __half* C_fp16 = (__half*)malloc(output_dim * state_dim * sizeof(__half));
-    __half* D_fp16 = (__half*)malloc(output_dim * input_dim * sizeof(__half));
+    __half* A = (__half*)malloc(state_dim * state_dim * sizeof(__half));
+    __half* B = (__half*)malloc(state_dim * input_dim * sizeof(__half));
+    __half* C = (__half*)malloc(output_dim * state_dim * sizeof(__half));
+    __half* D = (__half*)malloc(output_dim * input_dim * sizeof(__half));
     
     // Initialize weights on host
     __half scale_A = __float2half(0.5f / sqrtf(state_dim));
@@ -34,19 +34,19 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     __half scale_D = __float2half(1.5f / sqrtf(input_dim));
     
     for (int i = 0; i < state_dim * state_dim; i++) {
-        A_fp16[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_A);
+        A[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_A);
     }
     
     for (int i = 0; i < state_dim * input_dim; i++) {
-        B_fp16[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_B);
+        B[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_B);
     }
     
     for (int i = 0; i < output_dim * state_dim; i++) {
-        C_fp16[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_C);
+        C[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_C);
     }
     
     for (int i = 0; i < output_dim * input_dim; i++) {
-        D_fp16[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_D);
+        D[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_D);
     }
     
     // Allocate device memory for weights and gradients
@@ -77,10 +77,10 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&ssm->d_error_output, seq_len * batch_size * output_dim * sizeof(__half)));
     
     // Initialize device memory
-    CHECK_CUDA(cudaMemcpy(ssm->d_A, A_fp16, state_dim * state_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_B, B_fp16, state_dim * input_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_C, C_fp16, output_dim * state_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_D, D_fp16, output_dim * input_dim * sizeof(__half), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_A, A, state_dim * state_dim * sizeof(__half), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_B, B, state_dim * input_dim * sizeof(__half), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_C, C, output_dim * state_dim * sizeof(__half), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_D, D, output_dim * input_dim * sizeof(__half), cudaMemcpyHostToDevice));
     
     CHECK_CUDA(cudaMemset(ssm->d_A_m, 0, state_dim * state_dim * sizeof(__half)));
     CHECK_CUDA(cudaMemset(ssm->d_A_v, 0, state_dim * state_dim * sizeof(__half)));
@@ -92,7 +92,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMemset(ssm->d_D_v, 0, output_dim * input_dim * sizeof(__half)));
     
     // Free local host memory
-    free(A_fp16); free(B_fp16); free(C_fp16); free(D_fp16);
+    free(A); free(B); free(C); free(D);
     
     return ssm;
 }
@@ -147,36 +147,6 @@ __global__ void swish_backward_kernel_ssm(__half* grad_input, __half* grad_outpu
     }
 }
 
-// CUDA kernel to compute error
-__global__ void compute_error_kernel_ssm(__half* error, __half* pred, __half* target, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        error[idx] = __hsub(pred[idx], target[idx]);
-    }
-}
-
-// CUDA kernel for dot product reduction
-__global__ void dot_product_kernel_ssm(__half* input, float* output, int size) {
-    extern __shared__ float sdata[];
-    
-    unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    sdata[tid] = (i < size) ? __half2float(__hmul(input[i], input[i])) : 0.0f;
-    __syncthreads();
-    
-    // Reduction in shared memory
-    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            sdata[tid] += sdata[tid + s];
-        }
-        __syncthreads();
-    }
-    
-    // Write result for this block to global memory
-    if (tid == 0) atomicAdd(output, sdata[0]);
-}
-
 // Forward pass for single timestep
 void forward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep) {
     const __half alpha = __float2half(1.0f);
@@ -228,27 +198,50 @@ void forward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep) {
                             &alpha, d_Y_t, ssm->output_dim));
 }
 
+// CUDA kernel to compute error and loss in one pass
+__global__ void compute_error_and_loss_kernel_ssm(__half* pred, __half* target, __half* error, float* loss_sum, int total_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx < total_size) {
+        // Compute error: pred - target
+        __half err = __hsub(pred[idx], target[idx]);
+        error[idx] = err;
+        
+        // Convert to float and compute squared error
+        float err_f = __half2float(err);
+        float squared_err = err_f * err_f;
+        
+        // Atomic add to accumulate loss
+        atomicAdd(loss_sum, squared_err);
+    }
+}
+
 // Calculate loss
 float calculate_loss_ssm(SSM* ssm, __half* d_y) {
+    static float* d_loss_sum = nullptr;
+    static bool allocated = false;
+    
+    // One-time allocation of persistent device memory
+    if (!allocated) {
+        CHECK_CUDA(cudaMalloc(&d_loss_sum, sizeof(float)));
+        allocated = true;
+    }
+    
     int total_size = ssm->seq_len * ssm->batch_size * ssm->output_dim;
     
-    // Compute error: d_error_output = d_layer2_output - d_y
+    // Reset loss sum to zero
+    CHECK_CUDA(cudaMemset(d_loss_sum, 0, sizeof(float)));
+    
+    // Launch kernel to compute error and accumulate loss
     int block_size = 256;
     int num_blocks = (total_size + block_size - 1) / block_size;
-    compute_error_kernel_ssm<<<num_blocks, block_size>>>(ssm->d_error_output, ssm->d_layer2_output, d_y, total_size);
+    compute_error_and_loss_kernel_ssm<<<num_blocks, block_size>>>(
+        ssm->d_layer2_output, d_y, ssm->d_error_output, d_loss_sum, total_size
+    );
     
-    // Compute dot product for loss (sum of squares)
-    float* d_loss;
-    CHECK_CUDA(cudaMalloc(&d_loss, sizeof(float)));
-    CHECK_CUDA(cudaMemset(d_loss, 0, sizeof(float)));
-    
-    int dot_blocks = (total_size + block_size - 1) / block_size;
-    size_t smem_size = block_size * sizeof(float);
-    dot_product_kernel_ssm<<<dot_blocks, block_size, smem_size>>>(ssm->d_error_output, d_loss, total_size);
-    
+    // Copy result back to host
     float loss;
-    CHECK_CUDA(cudaMemcpy(&loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaFree(d_loss));
+    CHECK_CUDA(cudaMemcpy(&loss, d_loss_sum, sizeof(float), cudaMemcpyDeviceToHost));
     
     return loss / total_size;
 }
