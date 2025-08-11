@@ -14,7 +14,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     // Initialize Adam parameters
     ssm->beta1 = __float2half(0.9f);
     ssm->beta2 = __float2half(0.999f);
-    ssm->epsilon = __float2half(1e-4f);
+    ssm->epsilon = __float2half(2e-4f);
     ssm->t = 0;
     ssm->weight_decay = __float2half(0.01f);
     
