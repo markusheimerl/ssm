@@ -12,11 +12,11 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->batch_size = batch_size;
     
     // Initialize Adam parameters
-    ssm->beta1 = __float2half(0.9f);
-    ssm->beta2 = __float2half(0.999f);
-    ssm->epsilon = __float2half(2e-4f);
+    ssm->beta1 = 0.9f;
+    ssm->beta2 = 0.999f;
+    ssm->epsilon = 1e-8f;
     ssm->t = 0;
-    ssm->weight_decay = __float2half(0.01f);
+    ssm->weight_decay = 0.01f;
     
     // Initialize cuBLAS
     ssm->cublas_handle = cublas_handle;
@@ -54,20 +54,20 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&ssm->d_B, state_dim * input_dim * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&ssm->d_C, output_dim * state_dim * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&ssm->d_D, output_dim * input_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_A_grad, state_dim * state_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_B_grad, state_dim * input_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_C_grad, output_dim * state_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_D_grad, output_dim * input_dim * sizeof(__half)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_grad, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_B_grad, state_dim * input_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_C_grad, output_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_D_grad, output_dim * input_dim * sizeof(float)));
     
     // Allocate device memory for Adam parameters
-    CHECK_CUDA(cudaMalloc(&ssm->d_A_m, state_dim * state_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_A_v, state_dim * state_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_B_m, state_dim * input_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_B_v, state_dim * input_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_C_m, output_dim * state_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_C_v, output_dim * state_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_D_m, output_dim * input_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_D_v, output_dim * input_dim * sizeof(__half)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_m, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_A_v, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_B_m, state_dim * input_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_B_v, state_dim * input_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_C_m, output_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_C_v, output_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_D_m, output_dim * input_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ssm->d_D_v, output_dim * input_dim * sizeof(float)));
     
     // Allocate device memory for layer outputs and working buffers
     CHECK_CUDA(cudaMalloc(&ssm->d_layer1_preact, seq_len * batch_size * state_dim * sizeof(__half)));
@@ -85,14 +85,14 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMemcpy(ssm->d_C, C, output_dim * state_dim * sizeof(__half), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_D, D, output_dim * input_dim * sizeof(__half), cudaMemcpyHostToDevice));
     
-    CHECK_CUDA(cudaMemset(ssm->d_A_m, 0, state_dim * state_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMemset(ssm->d_A_v, 0, state_dim * state_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMemset(ssm->d_B_m, 0, state_dim * input_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMemset(ssm->d_B_v, 0, state_dim * input_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMemset(ssm->d_C_m, 0, output_dim * state_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMemset(ssm->d_C_v, 0, output_dim * state_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMemset(ssm->d_D_m, 0, output_dim * input_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMemset(ssm->d_D_v, 0, output_dim * input_dim * sizeof(__half)));
+    CHECK_CUDA(cudaMemset(ssm->d_A_m, 0, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_A_v, 0, state_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_B_m, 0, state_dim * input_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_B_v, 0, state_dim * input_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_C_m, 0, output_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_C_v, 0, output_dim * state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_D_m, 0, output_dim * input_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_D_v, 0, output_dim * input_dim * sizeof(float)));
     
     // Free local host memory
     free(A); free(B); free(C); free(D);
@@ -275,17 +275,18 @@ float calculate_loss_ssm(SSM* ssm, __half* d_y) {
 
 // Zero gradients
 void zero_gradients_ssm(SSM* ssm) {
-    CHECK_CUDA(cudaMemset(ssm->d_A_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMemset(ssm->d_B_grad, 0, ssm->state_dim * ssm->input_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMemset(ssm->d_C_grad, 0, ssm->output_dim * ssm->state_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMemset(ssm->d_D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(__half)));
+    CHECK_CUDA(cudaMemset(ssm->d_A_grad, 0, ssm->state_dim * ssm->state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_B_grad, 0, ssm->state_dim * ssm->input_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_C_grad, 0, ssm->output_dim * ssm->state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ssm->d_D_grad, 0, ssm->output_dim * ssm->input_dim * sizeof(float)));
 }
 
 // Backward pass for single timestep
 void backward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep) {
-    const __half alpha = __float2half(1.0f);
-    const __half beta = __float2half(0.0f);
-    
+    const float alpha_f = 1.0f;
+    const __half alpha_h = __float2half(1.0f);
+    const __half beta_h = __float2half(0.0f);
+
     // Get pointers to current timestep data
     __half* d_H_t = &ssm->d_layer1_preact[timestep * ssm->batch_size * ssm->state_dim];
     __half* d_S_t = &ssm->d_layer1_output[timestep * ssm->batch_size * ssm->state_dim];
@@ -296,32 +297,32 @@ void backward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep) {
     CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle,
                              CUBLAS_OP_N, CUBLAS_OP_T,
                              ssm->state_dim, ssm->output_dim, ssm->batch_size,
-                             &alpha,
+                             &alpha_f,
                              d_S_t, CUDA_R_16F, ssm->state_dim,
                              d_error_output_t, CUDA_R_16F, ssm->output_dim,
-                             &alpha,
-                             ssm->d_C_grad, CUDA_R_16F, ssm->state_dim,
-                             CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+                             &alpha_f,
+                             ssm->d_C_grad, CUDA_R_32F, ssm->state_dim,
+                             CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
     
     // ∂L/∂D += (∂L/∂Y_t)^T X_t
     CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle,
                              CUBLAS_OP_N, CUBLAS_OP_T,
                              ssm->input_dim, ssm->output_dim, ssm->batch_size,
-                             &alpha,
+                             &alpha_f,
                              d_X_t, CUDA_R_16F, ssm->input_dim,
                              d_error_output_t, CUDA_R_16F, ssm->output_dim,
-                             &alpha,
-                             ssm->d_D_grad, CUDA_R_16F, ssm->input_dim,
-                             CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+                             &alpha_f,
+                             ssm->d_D_grad, CUDA_R_32F, ssm->input_dim,
+                             CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
     
     // ∂L/∂S_t = (∂L/∂Y_t) C
     CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle,
                              CUBLAS_OP_N, CUBLAS_OP_N,
                              ssm->state_dim, ssm->batch_size, ssm->output_dim,
-                             &alpha,
+                             &alpha_h,
                              ssm->d_C, CUDA_R_16F, ssm->state_dim,
                              d_error_output_t, CUDA_R_16F, ssm->output_dim,
-                             &beta,
+                             &beta_h,
                              d_error_hidden_t, CUDA_R_16F, ssm->state_dim,
                              CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
     
@@ -334,12 +335,12 @@ void backward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep) {
     CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle,
                              CUBLAS_OP_N, CUBLAS_OP_T,
                              ssm->input_dim, ssm->state_dim, ssm->batch_size,
-                             &alpha,
+                             &alpha_f,
                              d_X_t, CUDA_R_16F, ssm->input_dim,
                              d_error_hidden_t, CUDA_R_16F, ssm->state_dim,
-                             &alpha,
-                             ssm->d_B_grad, CUDA_R_16F, ssm->input_dim,
-                             CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+                             &alpha_f,
+                             ssm->d_B_grad, CUDA_R_32F, ssm->input_dim,
+                             CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
     
     // Propagate error to previous timestep
     if (timestep > 0) {
@@ -350,60 +351,56 @@ void backward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep) {
         CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle,
                                  CUBLAS_OP_N, CUBLAS_OP_T,
                                  ssm->state_dim, ssm->state_dim, ssm->batch_size,
-                                 &alpha,
+                                 &alpha_f,
                                  d_H_prev, CUDA_R_16F, ssm->state_dim,
                                  d_error_hidden_t, CUDA_R_16F, ssm->state_dim,
-                                 &alpha,
-                                 ssm->d_A_grad, CUDA_R_16F, ssm->state_dim,
-                                 CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+                                 &alpha_f,
+                                 ssm->d_A_grad, CUDA_R_32F, ssm->state_dim,
+                                 CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
         
         // ∂L/∂H_{t-1} += (∂L/∂H_t) A
         CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle,
                                  CUBLAS_OP_N, CUBLAS_OP_N,
                                  ssm->state_dim, ssm->batch_size, ssm->state_dim,
-                                 &alpha,
+                                 &alpha_h,
                                  ssm->d_A, CUDA_R_16F, ssm->state_dim,
                                  d_error_hidden_t, CUDA_R_16F, ssm->state_dim,
-                                 &alpha,
+                                 &alpha_h,
                                  d_error_hidden_prev, CUDA_R_16F, ssm->state_dim,
                                  CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
     }
 }
 
 // CUDA kernel for AdamW update
-__global__ void adamw_update_kernel_ssm(__half* weight, __half* grad, __half* m, __half* v,
-                                        __half beta1, __half beta2, __half epsilon, __half learning_rate,
-                                        __half weight_decay, __half alpha_t, int size, int total_samples) {
+__global__ void adamw_update_kernel_ssm(__half* weight, float* grad, float* m, float* v,
+                                        float beta1, float beta2, float epsilon, float learning_rate,
+                                        float weight_decay, float alpha_t, int size, int total_samples) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        __half g = __hdiv(grad[idx], __float2half((float)total_samples));
-        __half one = __float2half(1.0f);
+        float g = grad[idx] / (float)total_samples;
         
         // m = β₁m + (1-β₁)(∂L/∂W)
-        __half one_minus_beta1 = __hsub(one, beta1);
-        m[idx] = __hadd(__hmul(beta1, m[idx]), __hmul(one_minus_beta1, g));
+        m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
         
         // v = β₂v + (1-β₂)(∂L/∂W)²
-        __half one_minus_beta2 = __hsub(one, beta2);
-        __half g_squared = __hmul(g, g);
-        v[idx] = __hadd(__hmul(beta2, v[idx]), __hmul(one_minus_beta2, g_squared));
+        v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
         
-        __half update = __hdiv(__hmul(alpha_t, m[idx]), __hadd(hsqrt(v[idx]), epsilon));
+        float update = alpha_t * m[idx] / (sqrtf(v[idx]) + epsilon);
         
         // W = (1-λη)W - update
-        __half decay_factor = __hsub(one, __hmul(learning_rate, weight_decay));
-        weight[idx] = __hsub(__hmul(weight[idx], decay_factor), update);
+        float decay_factor = 1.0f - learning_rate * weight_decay;
+        float new_weight = __half2float(weight[idx]) * decay_factor - update;
+        weight[idx] = __float2half(new_weight);
     }
 }
 
 // Update weights using AdamW
-void update_weights_ssm(SSM* ssm, __half learning_rate) {
+void update_weights_ssm(SSM* ssm, float learning_rate) {
     ssm->t++;  // Increment time step
     
-    float beta1_t_f = powf(__half2float(ssm->beta1), ssm->t);
-    float beta2_t_f = powf(__half2float(ssm->beta2), ssm->t);
-    float alpha_t_f = __half2float(learning_rate) * sqrtf(1.0f - beta2_t_f) / (1.0f - beta1_t_f);
-    __half alpha_t = __float2half(alpha_t_f);
+    float beta1_t = powf(ssm->beta1, ssm->t);
+    float beta2_t = powf(ssm->beta2, ssm->t);
+    float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
     
     int total_samples = ssm->seq_len * ssm->batch_size;
     int block_size = 256;
@@ -482,33 +479,33 @@ void save_ssm(SSM* ssm, const char* filename) {
     // Save Adam state
     fwrite(&ssm->t, sizeof(int), 1, file);
     
-    // Also save Adam state variables
-    __half* A_m = (__half*)malloc(ssm->state_dim * ssm->state_dim * sizeof(__half));
-    __half* A_v = (__half*)malloc(ssm->state_dim * ssm->state_dim * sizeof(__half));
-    __half* B_m = (__half*)malloc(ssm->state_dim * ssm->input_dim * sizeof(__half));
-    __half* B_v = (__half*)malloc(ssm->state_dim * ssm->input_dim * sizeof(__half));
-    __half* C_m = (__half*)malloc(ssm->output_dim * ssm->state_dim * sizeof(__half));
-    __half* C_v = (__half*)malloc(ssm->output_dim * ssm->state_dim * sizeof(__half));
-    __half* D_m = (__half*)malloc(ssm->output_dim * ssm->input_dim * sizeof(__half));
-    __half* D_v = (__half*)malloc(ssm->output_dim * ssm->input_dim * sizeof(__half));
+    // Also save Adam state variables (now in float)
+    float* A_m = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
+    float* A_v = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
+    float* B_m = (float*)malloc(ssm->state_dim * ssm->input_dim * sizeof(float));
+    float* B_v = (float*)malloc(ssm->state_dim * ssm->input_dim * sizeof(float));
+    float* C_m = (float*)malloc(ssm->output_dim * ssm->state_dim * sizeof(float));
+    float* C_v = (float*)malloc(ssm->output_dim * ssm->state_dim * sizeof(float));
+    float* D_m = (float*)malloc(ssm->output_dim * ssm->input_dim * sizeof(float));
+    float* D_v = (float*)malloc(ssm->output_dim * ssm->input_dim * sizeof(float));
     
-    CHECK_CUDA(cudaMemcpy(A_m, ssm->d_A_m, ssm->state_dim * ssm->state_dim * sizeof(__half), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(A_v, ssm->d_A_v, ssm->state_dim * ssm->state_dim * sizeof(__half), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(B_m, ssm->d_B_m, ssm->state_dim * ssm->input_dim * sizeof(__half), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(B_v, ssm->d_B_v, ssm->state_dim * ssm->input_dim * sizeof(__half), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(C_m, ssm->d_C_m, ssm->output_dim * ssm->state_dim * sizeof(__half), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(C_v, ssm->d_C_v, ssm->output_dim * ssm->state_dim * sizeof(__half), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(D_m, ssm->d_D_m, ssm->output_dim * ssm->input_dim * sizeof(__half), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(D_v, ssm->d_D_v, ssm->output_dim * ssm->input_dim * sizeof(__half), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(A_m, ssm->d_A_m, ssm->state_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(A_v, ssm->d_A_v, ssm->state_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(B_m, ssm->d_B_m, ssm->state_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(B_v, ssm->d_B_v, ssm->state_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(C_m, ssm->d_C_m, ssm->output_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(C_v, ssm->d_C_v, ssm->output_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(D_m, ssm->d_D_m, ssm->output_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(D_v, ssm->d_D_v, ssm->output_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     
-    fwrite(A_m, sizeof(__half), ssm->state_dim * ssm->state_dim, file);
-    fwrite(A_v, sizeof(__half), ssm->state_dim * ssm->state_dim, file);
-    fwrite(B_m, sizeof(__half), ssm->state_dim * ssm->input_dim, file);
-    fwrite(B_v, sizeof(__half), ssm->state_dim * ssm->input_dim, file);
-    fwrite(C_m, sizeof(__half), ssm->output_dim * ssm->state_dim, file);
-    fwrite(C_v, sizeof(__half), ssm->output_dim * ssm->state_dim, file);
-    fwrite(D_m, sizeof(__half), ssm->output_dim * ssm->input_dim, file);
-    fwrite(D_v, sizeof(__half), ssm->output_dim * ssm->input_dim, file);
+    fwrite(A_m, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    fwrite(A_v, sizeof(float), ssm->state_dim * ssm->state_dim, file);
+    fwrite(B_m, sizeof(float), ssm->state_dim * ssm->input_dim, file);
+    fwrite(B_v, sizeof(float), ssm->state_dim * ssm->input_dim, file);
+    fwrite(C_m, sizeof(float), ssm->output_dim * ssm->state_dim, file);
+    fwrite(C_v, sizeof(float), ssm->output_dim * ssm->state_dim, file);
+    fwrite(D_m, sizeof(float), ssm->output_dim * ssm->input_dim, file);
+    fwrite(D_v, sizeof(float), ssm->output_dim * ssm->input_dim, file);
     
     // Free temporary host memory
     free(A); free(B); free(C); free(D);
@@ -562,34 +559,34 @@ SSM* load_ssm(const char* filename, int custom_batch_size, cublasHandle_t cublas
     CHECK_CUDA(cudaMemcpy(ssm->d_C, C, output_dim * state_dim * sizeof(__half), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_D, D, output_dim * input_dim * sizeof(__half), cudaMemcpyHostToDevice));
     
-    // Load Adam state variables
-    __half* A_m = (__half*)malloc(state_dim * state_dim * sizeof(__half));
-    __half* A_v = (__half*)malloc(state_dim * state_dim * sizeof(__half));
-    __half* B_m = (__half*)malloc(state_dim * input_dim * sizeof(__half));
-    __half* B_v = (__half*)malloc(state_dim * input_dim * sizeof(__half));
-    __half* C_m = (__half*)malloc(output_dim * state_dim * sizeof(__half));
-    __half* C_v = (__half*)malloc(output_dim * state_dim * sizeof(__half));
-    __half* D_m = (__half*)malloc(output_dim * input_dim * sizeof(__half));
-    __half* D_v = (__half*)malloc(output_dim * input_dim * sizeof(__half));
+    // Load Adam state variables (now in float)
+    float* A_m = (float*)malloc(state_dim * state_dim * sizeof(float));
+    float* A_v = (float*)malloc(state_dim * state_dim * sizeof(float));
+    float* B_m = (float*)malloc(state_dim * input_dim * sizeof(float));
+    float* B_v = (float*)malloc(state_dim * input_dim * sizeof(float));
+    float* C_m = (float*)malloc(output_dim * state_dim * sizeof(float));
+    float* C_v = (float*)malloc(output_dim * state_dim * sizeof(float));
+    float* D_m = (float*)malloc(output_dim * input_dim * sizeof(float));
+    float* D_v = (float*)malloc(output_dim * input_dim * sizeof(float));
     
-    fread(A_m, sizeof(__half), state_dim * state_dim, file);
-    fread(A_v, sizeof(__half), state_dim * state_dim, file);
-    fread(B_m, sizeof(__half), state_dim * input_dim, file);
-    fread(B_v, sizeof(__half), state_dim * input_dim, file);
-    fread(C_m, sizeof(__half), output_dim * state_dim, file);
-    fread(C_v, sizeof(__half), output_dim * state_dim, file);
-    fread(D_m, sizeof(__half), output_dim * input_dim, file);
-    fread(D_v, sizeof(__half), output_dim * input_dim, file);
+    fread(A_m, sizeof(float), state_dim * state_dim, file);
+    fread(A_v, sizeof(float), state_dim * state_dim, file);
+    fread(B_m, sizeof(float), state_dim * input_dim, file);
+    fread(B_v, sizeof(float), state_dim * input_dim, file);
+    fread(C_m, sizeof(float), output_dim * state_dim, file);
+    fread(C_v, sizeof(float), output_dim * state_dim, file);
+    fread(D_m, sizeof(float), output_dim * input_dim, file);
+    fread(D_v, sizeof(float), output_dim * input_dim, file);
     
     // Copy Adam state to device
-    CHECK_CUDA(cudaMemcpy(ssm->d_A_m, A_m, state_dim * state_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_A_v, A_v, state_dim * state_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_B_m, B_m, state_dim * input_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_B_v, B_v, state_dim * input_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_C_m, C_m, output_dim * state_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_C_v, C_v, output_dim * state_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_D_m, D_m, output_dim * input_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_D_v, D_v, output_dim * input_dim * sizeof(__half), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_A_m, A_m, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_A_v, A_v, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_B_m, B_m, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_B_v, B_v, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_C_m, C_m, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_C_v, C_v, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_D_m, D_m, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ssm->d_D_v, D_v, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     // Free temporary host memory
     free(A); free(B); free(C); free(D);

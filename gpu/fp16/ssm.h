@@ -41,25 +41,25 @@ typedef struct {
     __half* d_D;           // output_dim x input_dim
     
     // Device pointers for gradients
-    __half* d_A_grad;      // state_dim x state_dim
-    __half* d_B_grad;      // state_dim x input_dim
-    __half* d_C_grad;      // output_dim x state_dim
-    __half* d_D_grad;      // output_dim x input_dim
+    float* d_A_grad;       // state_dim x state_dim
+    float* d_B_grad;       // state_dim x input_dim
+    float* d_C_grad;       // output_dim x state_dim
+    float* d_D_grad;       // output_dim x input_dim
     
     // Device pointers for Adam parameters
-    __half* d_A_m;  // First moment for A
-    __half* d_A_v;  // Second moment for A
-    __half* d_B_m;  // First moment for B
-    __half* d_B_v;  // Second moment for B
-    __half* d_C_m;  // First moment for C
-    __half* d_C_v;  // Second moment for C
-    __half* d_D_m;  // First moment for D
-    __half* d_D_v;  // Second moment for D
-    __half beta1;   // Exponential decay rate for first moment
-    __half beta2;   // Exponential decay rate for second moment
-    __half epsilon; // Small constant for numerical stability
-    int t;          // Time step
-    __half weight_decay; // Weight decay parameter for AdamW
+    float* d_A_m;          // First moment for A
+    float* d_A_v;          // Second moment for A
+    float* d_B_m;          // First moment for B
+    float* d_B_v;          // Second moment for B
+    float* d_C_m;          // First moment for C
+    float* d_C_v;          // Second moment for C
+    float* d_D_m;          // First moment for D
+    float* d_D_v;          // Second moment for D
+    float beta1;           // Exponential decay rate for first moment
+    float beta2;           // Exponential decay rate for second moment
+    float epsilon;         // Small constant for numerical stability
+    int t;                 // Time step
+    float weight_decay;    // Weight decay parameter for AdamW
     
     // Device pointers for layer outputs and working buffers
     __half* d_layer1_preact;   // seq_len x batch_size x state_dim
@@ -85,7 +85,7 @@ typedef struct {
 // CUDA kernel prototypes
 __global__ void swish_forward_kernel_ssm(__half* output, __half* input, int size);
 __global__ void swish_backward_kernel_ssm(__half* grad_input, __half* grad_output, __half* input, int size);
-__global__ void adamw_update_kernel_ssm(__half* weight, __half* grad, __half* m, __half* v, __half beta1, __half beta2, __half epsilon, __half learning_rate, __half weight_decay, __half alpha_t, int size, int total_samples);
+__global__ void adamw_update_kernel_ssm(__half* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int total_samples);
 __global__ void hgeam_kernel_ssm(__half* C, __half alpha, __half* A, __half beta, __half* B, int rows, int cols);
 __global__ void hdot_kernel_ssm(__half* x, float* result, int size);
 
@@ -97,7 +97,7 @@ void forward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep);
 float calculate_loss_ssm(SSM* ssm, __half* d_y);
 void zero_gradients_ssm(SSM* ssm);
 void backward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep);
-void update_weights_ssm(SSM* ssm, __half learning_rate);
+void update_weights_ssm(SSM* ssm, float learning_rate);
 void save_ssm(SSM* ssm, const char* filename);
 SSM* load_ssm(const char* filename, int custom_batch_size, cublasHandle_t cublas_handle);
 
