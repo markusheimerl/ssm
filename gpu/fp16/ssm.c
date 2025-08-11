@@ -151,7 +151,7 @@ __global__ void swish_backward_kernel_ssm(__half* grad_input, __half* grad_outpu
     }
 }
 
-// CUDA kernel for FP16 matrix addition/subtraction
+// CUDA kernel for matrix addition/subtraction
 __global__ void hgeam_kernel_ssm(__half* C, __half alpha, __half* A, __half beta, __half* B, int rows, int cols) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_size = rows * cols;
@@ -163,7 +163,7 @@ __global__ void hgeam_kernel_ssm(__half* C, __half alpha, __half* A, __half beta
     }
 }
 
-// CUDA kernel for FP16 dot product
+// CUDA kernel for dot product
 __global__ void hdot_kernel_ssm(__half* x, float* result, int size) {
     extern __shared__ float sdata[];
     
@@ -352,7 +352,7 @@ void backward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep) {
     }
 }
 
-// CUDA kernel for AdamW update (all FP16)
+// CUDA kernel for AdamW update
 __global__ void adamw_update_kernel_ssm(__half* weight, __half* grad, __half* m, __half* v,
                                         __half beta1, __half beta2, __half epsilon, __half learning_rate,
                                         __half weight_decay, __half alpha_t, int size, int total_samples) {
