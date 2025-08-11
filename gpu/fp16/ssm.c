@@ -293,28 +293,37 @@ void backward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep) {
     __half* d_error_hidden_t = &ssm->d_error_hidden[timestep * ssm->batch_size * ssm->state_dim];
     
     // ∂L/∂C += (∂L/∂Y_t)^T S_t
-    CHECK_CUBLAS(cublasHgemm(ssm->cublas_handle,
-                            CUBLAS_OP_N, CUBLAS_OP_T,
-                            ssm->state_dim, ssm->output_dim, ssm->batch_size,
-                            &alpha, d_S_t, ssm->state_dim,
-                            d_error_output_t, ssm->output_dim,
-                            &alpha, ssm->d_C_grad, ssm->state_dim));
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle,
+                             CUBLAS_OP_N, CUBLAS_OP_T,
+                             ssm->state_dim, ssm->output_dim, ssm->batch_size,
+                             &alpha,
+                             d_S_t, CUDA_R_16F, ssm->state_dim,
+                             d_error_output_t, CUDA_R_16F, ssm->output_dim,
+                             &alpha,
+                             ssm->d_C_grad, CUDA_R_16F, ssm->state_dim,
+                             CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
     
     // ∂L/∂D += (∂L/∂Y_t)^T X_t
-    CHECK_CUBLAS(cublasHgemm(ssm->cublas_handle,
-                            CUBLAS_OP_N, CUBLAS_OP_T,
-                            ssm->input_dim, ssm->output_dim, ssm->batch_size,
-                            &alpha, d_X_t, ssm->input_dim,
-                            d_error_output_t, ssm->output_dim,
-                            &alpha, ssm->d_D_grad, ssm->input_dim));
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle,
+                             CUBLAS_OP_N, CUBLAS_OP_T,
+                             ssm->input_dim, ssm->output_dim, ssm->batch_size,
+                             &alpha,
+                             d_X_t, CUDA_R_16F, ssm->input_dim,
+                             d_error_output_t, CUDA_R_16F, ssm->output_dim,
+                             &alpha,
+                             ssm->d_D_grad, CUDA_R_16F, ssm->input_dim,
+                             CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
     
     // ∂L/∂S_t = (∂L/∂Y_t) C
-    CHECK_CUBLAS(cublasHgemm(ssm->cublas_handle,
-                            CUBLAS_OP_N, CUBLAS_OP_N,
-                            ssm->state_dim, ssm->batch_size, ssm->output_dim,
-                            &alpha, ssm->d_C, ssm->state_dim,
-                            d_error_output_t, ssm->output_dim,
-                            &beta, d_error_hidden_t, ssm->state_dim));
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle,
+                             CUBLAS_OP_N, CUBLAS_OP_N,
+                             ssm->state_dim, ssm->batch_size, ssm->output_dim,
+                             &alpha,
+                             ssm->d_C, CUDA_R_16F, ssm->state_dim,
+                             d_error_output_t, CUDA_R_16F, ssm->output_dim,
+                             &beta,
+                             d_error_hidden_t, CUDA_R_16F, ssm->state_dim,
+                             CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
     
     // ∂L/∂H_t = ∂L/∂S_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))]
     int block_size = 256;
@@ -322,12 +331,15 @@ void backward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep) {
     swish_backward_kernel_ssm<<<num_blocks, block_size>>>(d_error_hidden_t, d_error_hidden_t, d_H_t, ssm->batch_size * ssm->state_dim);
     
     // ∂L/∂B += (∂L/∂H_t)^T X_t
-    CHECK_CUBLAS(cublasHgemm(ssm->cublas_handle,
-                            CUBLAS_OP_N, CUBLAS_OP_T,
-                            ssm->input_dim, ssm->state_dim, ssm->batch_size,
-                            &alpha, d_X_t, ssm->input_dim,
-                            d_error_hidden_t, ssm->state_dim,
-                            &alpha, ssm->d_B_grad, ssm->input_dim));
+    CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle,
+                             CUBLAS_OP_N, CUBLAS_OP_T,
+                             ssm->input_dim, ssm->state_dim, ssm->batch_size,
+                             &alpha,
+                             d_X_t, CUDA_R_16F, ssm->input_dim,
+                             d_error_hidden_t, CUDA_R_16F, ssm->state_dim,
+                             &alpha,
+                             ssm->d_B_grad, CUDA_R_16F, ssm->input_dim,
+                             CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
     
     // Propagate error to previous timestep
     if (timestep > 0) {
@@ -335,20 +347,26 @@ void backward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep) {
         __half* d_error_hidden_prev = &ssm->d_error_hidden[(timestep-1) * ssm->batch_size * ssm->state_dim];
         
         // ∂L/∂A += (∂L/∂H_t)^T H_{t-1}
-        CHECK_CUBLAS(cublasHgemm(ssm->cublas_handle,
-                                CUBLAS_OP_N, CUBLAS_OP_T,
-                                ssm->state_dim, ssm->state_dim, ssm->batch_size,
-                                &alpha, d_H_prev, ssm->state_dim,
-                                d_error_hidden_t, ssm->state_dim,
-                                &alpha, ssm->d_A_grad, ssm->state_dim));
+        CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle,
+                                 CUBLAS_OP_N, CUBLAS_OP_T,
+                                 ssm->state_dim, ssm->state_dim, ssm->batch_size,
+                                 &alpha,
+                                 d_H_prev, CUDA_R_16F, ssm->state_dim,
+                                 d_error_hidden_t, CUDA_R_16F, ssm->state_dim,
+                                 &alpha,
+                                 ssm->d_A_grad, CUDA_R_16F, ssm->state_dim,
+                                 CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
         
         // ∂L/∂H_{t-1} += (∂L/∂H_t) A
-        CHECK_CUBLAS(cublasHgemm(ssm->cublas_handle,
-                                CUBLAS_OP_N, CUBLAS_OP_N,
-                                ssm->state_dim, ssm->batch_size, ssm->state_dim,
-                                &alpha, ssm->d_A, ssm->state_dim,
-                                d_error_hidden_t, ssm->state_dim,
-                                &alpha, d_error_hidden_prev, ssm->state_dim));
+        CHECK_CUBLAS(cublasGemmEx(ssm->cublas_handle,
+                                 CUBLAS_OP_N, CUBLAS_OP_N,
+                                 ssm->state_dim, ssm->batch_size, ssm->state_dim,
+                                 &alpha,
+                                 ssm->d_A, CUDA_R_16F, ssm->state_dim,
+                                 d_error_hidden_t, CUDA_R_16F, ssm->state_dim,
+                                 &alpha,
+                                 d_error_hidden_prev, CUDA_R_16F, ssm->state_dim,
+                                 CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
     }
 }
 
