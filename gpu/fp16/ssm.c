@@ -28,25 +28,25 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     __half* D = (__half*)malloc(output_dim * input_dim * sizeof(__half));
     
     // Initialize weights on host
-    __half scale_A = __float2half(0.5f / sqrtf(state_dim));
-    __half scale_B = __float2half(1.5f / sqrtf(input_dim));
-    __half scale_C = __float2half(1.5f / sqrtf(state_dim));
-    __half scale_D = __float2half(1.5f / sqrtf(input_dim));
-    
+    float scale_A = 0.5f / sqrtf(state_dim);
+    float scale_B = 1.5f / sqrtf(input_dim);
+    float scale_C = 1.5f / sqrtf(state_dim);
+    float scale_D = 1.5f / sqrtf(input_dim);
+
     for (int i = 0; i < state_dim * state_dim; i++) {
-        A[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_A);
+        A[i] = __float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_A);
     }
-    
+
     for (int i = 0; i < state_dim * input_dim; i++) {
-        B[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_B);
+        B[i] = __float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_B);
     }
-    
+
     for (int i = 0; i < output_dim * state_dim; i++) {
-        C[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_C);
+        C[i] = __float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_C);
     }
-    
+
     for (int i = 0; i < output_dim * input_dim; i++) {
-        D[i] = __hmul(__float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f)), scale_D);
+        D[i] = __float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_D);
     }
     
     // Allocate device memory for weights and gradients
