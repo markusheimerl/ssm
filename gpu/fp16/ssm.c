@@ -76,6 +76,9 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&ssm->d_error_hidden, seq_len * batch_size * state_dim * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&ssm->d_error_output, seq_len * batch_size * output_dim * sizeof(__half)));
     
+    // Allocate device memory for loss computation
+    CHECK_CUDA(cudaMalloc(&ssm->d_loss, sizeof(float)));
+    
     // Initialize device memory
     CHECK_CUDA(cudaMemcpy(ssm->d_A, A, state_dim * state_dim * sizeof(__half), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_B, B, state_dim * input_dim * sizeof(__half), cudaMemcpyHostToDevice));
@@ -108,6 +111,7 @@ void free_ssm(SSM* ssm) {
     cudaFree(ssm->d_D_m); cudaFree(ssm->d_D_v);
     cudaFree(ssm->d_layer1_preact); cudaFree(ssm->d_layer1_output); cudaFree(ssm->d_layer2_output);
     cudaFree(ssm->d_error_output); cudaFree(ssm->d_error_hidden);
+    cudaFree(ssm->d_loss);
     free(ssm);
 }
 
@@ -144,6 +148,49 @@ __global__ void swish_backward_kernel_ssm(__half* grad_input, __half* grad_outpu
         __half h_sigmoid = __hmul(h, sigmoid);
         __half derivative = __hadd(sigmoid, __hmul(h_sigmoid, one_minus_sigmoid));
         grad_input[idx] = __hmul(grad_output[idx], derivative);
+    }
+}
+
+// CUDA kernel for FP16 matrix addition/subtraction
+__global__ void hgeam_kernel_ssm(__half* C, __half alpha, __half* A, __half beta, __half* B, int rows, int cols) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_size = rows * cols;
+    
+    if (idx < total_size) {
+        __half a_val = __hmul(alpha, A[idx]);
+        __half b_val = __hmul(beta, B[idx]);
+        C[idx] = __hadd(a_val, b_val);
+    }
+}
+
+// CUDA kernel for FP16 dot product
+__global__ void hdot_kernel_ssm(__half* x, float* result, int size) {
+    extern __shared__ float sdata[];
+    
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load data into shared memory and compute partial sum
+    float temp = 0.0f;
+    if (idx < size) {
+        __half val = x[idx];
+        float val_f = __half2float(val);
+        temp = val_f * val_f;
+    }
+    sdata[tid] = temp;
+    __syncthreads();
+    
+    // Reduction in shared memory
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+    
+    // Write result for this block to global memory
+    if (tid == 0) {
+        atomicAdd(result, sdata[0]);
     }
 }
 
@@ -198,50 +245,30 @@ void forward_pass_ssm(SSM* ssm, __half* d_X_t, int timestep) {
                             &alpha, d_Y_t, ssm->output_dim));
 }
 
-// CUDA kernel to compute error and loss in one pass
-__global__ void compute_error_and_loss_kernel_ssm(__half* pred, __half* target, __half* error, float* loss_sum, int total_size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (idx < total_size) {
-        // Compute error: pred - target
-        __half err = __hsub(pred[idx], target[idx]);
-        error[idx] = err;
-        
-        // Convert to float and compute squared error
-        float err_f = __half2float(err);
-        float squared_err = err_f * err_f;
-        
-        // Atomic add to accumulate loss
-        atomicAdd(loss_sum, squared_err);
-    }
-}
-
 // Calculate loss
 float calculate_loss_ssm(SSM* ssm, __half* d_y) {
-    static float* d_loss_sum = nullptr;
-    static bool allocated = false;
-    
-    // One-time allocation of persistent device memory
-    if (!allocated) {
-        CHECK_CUDA(cudaMalloc(&d_loss_sum, sizeof(float)));
-        allocated = true;
-    }
-    
+    const __half alpha = __float2half(1.0f);
+    const __half beta = __float2half(-1.0f);
     int total_size = ssm->seq_len * ssm->batch_size * ssm->output_dim;
     
-    // Reset loss sum to zero
-    CHECK_CUDA(cudaMemset(d_loss_sum, 0, sizeof(float)));
+    // Reset loss to zero
+    CHECK_CUDA(cudaMemset(ssm->d_loss, 0, sizeof(float)));
     
-    // Launch kernel to compute error and accumulate loss
+    // ∂L/∂Y = Y - Y_true
     int block_size = 256;
     int num_blocks = (total_size + block_size - 1) / block_size;
-    compute_error_and_loss_kernel_ssm<<<num_blocks, block_size>>>(
-        ssm->d_layer2_output, d_y, ssm->d_error_output, d_loss_sum, total_size
-    );
+    hgeam_kernel_ssm<<<num_blocks, block_size>>>(
+        ssm->d_error_output, alpha, ssm->d_layer2_output, beta, d_y, 
+        ssm->output_dim, ssm->seq_len * ssm->batch_size);
+    
+    // Compute dot product
+    int shared_mem_size = block_size * sizeof(float);
+    hdot_kernel_ssm<<<num_blocks, block_size, shared_mem_size>>>(
+        ssm->d_error_output, ssm->d_loss, total_size);
     
     // Copy result back to host
     float loss;
-    CHECK_CUDA(cudaMemcpy(&loss, d_loss_sum, sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(&loss, ssm->d_loss, sizeof(float), cudaMemcpyDeviceToHost));
     
     return loss / total_size;
 }

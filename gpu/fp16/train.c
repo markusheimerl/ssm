@@ -29,11 +29,41 @@ void reshape_and_convert_data_for_batch_processing(float* X, float* y, __half** 
     }
 }
 
-// Convert FP16 array to FP32
-void convert_fp16_to_fp32(__half* src, float* dst, int size) {
+// Compute R² score in FP16
+float compute_r2_score_fp16(__half* predictions, __half* targets, int size) {
+    // Compute mean of targets
+    double y_mean = 0.0;
     for (int i = 0; i < size; i++) {
-        dst[i] = __half2float(src[i]);
+        y_mean += __half2float(targets[i]);
     }
+    y_mean /= size;
+    
+    double ss_res = 0.0;
+    double ss_tot = 0.0;
+    
+    for (int i = 0; i < size; i++) {
+        float pred = __half2float(predictions[i]);
+        float actual = __half2float(targets[i]);
+        
+        double diff_res = actual - pred;
+        double diff_tot = actual - y_mean;
+        
+        ss_res += diff_res * diff_res;
+        ss_tot += diff_tot * diff_tot;
+    }
+    
+    return (float)(1.0 - (ss_res / ss_tot));
+}
+
+// Compute MAE in FP16
+float compute_mae_fp16(__half* predictions, __half* targets, int size) {
+    double mae = 0.0;
+    for (int i = 0; i < size; i++) {
+        float pred = __half2float(predictions[i]);
+        float actual = __half2float(targets[i]);
+        mae += fabs(pred - actual);
+    }
+    return (float)(mae / size);
 }
 
 int main() {
@@ -134,42 +164,33 @@ int main() {
 
     printf("\nEvaluating model performance...\n");
 
-    // Copy predictions from device to host for evaluation (convert back to FP32)
+    // Copy predictions from device to host
     __half* predictions_fp16 = (__half*)malloc(seq_len * batch_size * output_dim * sizeof(__half));
-    float* predictions = (float*)malloc(seq_len * batch_size * output_dim * sizeof(float));
     CHECK_CUDA(cudaMemcpy(predictions_fp16, loaded_ssm->d_layer2_output, seq_len * batch_size * output_dim * sizeof(__half), cudaMemcpyDeviceToHost));
-    convert_fp16_to_fp32(predictions_fp16, predictions, seq_len * batch_size * output_dim);
 
-    // Convert y_reshaped_fp16 back to FP32 for evaluation
-    float* y_reshaped = (float*)malloc(seq_len * batch_size * output_dim * sizeof(float));
-    convert_fp16_to_fp32(y_reshaped_fp16, y_reshaped, seq_len * batch_size * output_dim);
-
-    // Calculate R² scores
+    // Calculate R² scores using FP16 directly
     printf("\nR² scores:\n");
     int total_samples = num_sequences * seq_len;
     for (int i = 0; i < output_dim; i++) {
-        float y_mean = 0.0f;
+        // Extract predictions and targets for this output dimension
+        __half* output_predictions = (__half*)malloc(total_samples * sizeof(__half));
+        __half* output_targets = (__half*)malloc(total_samples * sizeof(__half));
+        
+        int sample_idx = 0;
         for (int t = 0; t < seq_len; t++) {
             for (int b = 0; b < num_sequences; b++) {
                 int idx = t * num_sequences * output_dim + b * output_dim + i;
-                y_mean += y_reshaped[idx];
+                output_predictions[sample_idx] = predictions_fp16[idx];
+                output_targets[sample_idx] = y_reshaped_fp16[idx];
+                sample_idx++;
             }
         }
-        y_mean /= total_samples;
-
-        float ss_res = 0.0f;
-        float ss_tot = 0.0f;
-        for (int t = 0; t < seq_len; t++) {
-            for (int b = 0; b < num_sequences; b++) {
-                int idx = t * num_sequences * output_dim + b * output_dim + i;
-                float diff_res = y_reshaped[idx] - predictions[idx];
-                float diff_tot = y_reshaped[idx] - y_mean;
-                ss_res += diff_res * diff_res;
-                ss_tot += diff_tot * diff_tot;
-            }
-        }
-        float r2 = 1.0f - (ss_res / ss_tot);
+        
+        float r2 = compute_r2_score_fp16(output_predictions, output_targets, total_samples);
         printf("R² score for output y%d: %.8f\n", i, r2);
+        
+        free(output_predictions);
+        free(output_targets);
     }
 
     // Print sample predictions from first sequence
@@ -182,22 +203,31 @@ int main() {
         for (int t = 0; t < 10; t++) {
             // First sequence (b=0) in reshaped format
             int idx = t * num_sequences * output_dim + 0 * output_dim + i;
-            float pred = predictions[idx];
-            float actual = y_reshaped[idx];
+            float pred = __half2float(predictions_fp16[idx]);
+            float actual = __half2float(y_reshaped_fp16[idx]);
             float diff = pred - actual;
             printf("t=%d\t\t%8.3f\t%8.3f\t%8.3f\n", t, pred, actual, diff);
         }
         
         // Calculate MAE for this output across all sequences and time steps
-        float mae = 0.0f;
+        __half* output_predictions = (__half*)malloc(total_samples * sizeof(__half));
+        __half* output_targets = (__half*)malloc(total_samples * sizeof(__half));
+        
+        int sample_idx = 0;
         for (int t = 0; t < seq_len; t++) {
             for (int b = 0; b < num_sequences; b++) {
                 int idx = t * num_sequences * output_dim + b * output_dim + i;
-                mae += fabs(predictions[idx] - y_reshaped[idx]);
+                output_predictions[sample_idx] = predictions_fp16[idx];
+                output_targets[sample_idx] = y_reshaped_fp16[idx];
+                sample_idx++;
             }
         }
-        mae /= total_samples;
+        
+        float mae = compute_mae_fp16(output_predictions, output_targets, total_samples);
         printf("Mean Absolute Error for y%d: %.3f\n", i, mae);
+        
+        free(output_predictions);
+        free(output_targets);
     }
     
     // Cleanup
@@ -205,8 +235,6 @@ int main() {
     free(y);
     free(X_reshaped_fp16);
     free(y_reshaped_fp16);
-    free(y_reshaped);
-    free(predictions);
     free(predictions_fp16);
     CHECK_CUDA(cudaFree(d_X));
     CHECK_CUDA(cudaFree(d_y));

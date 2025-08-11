@@ -68,6 +68,9 @@ typedef struct {
     __half* d_error_hidden;    // seq_len x batch_size x state_dim
     __half* d_error_output;    // seq_len x batch_size x output_dim
     
+    // Device memory for loss computation
+    float* d_loss;
+    
     // cuBLAS handle
     cublasHandle_t cublas_handle;
     
@@ -83,8 +86,8 @@ typedef struct {
 __global__ void swish_forward_kernel_ssm(__half* output, __half* input, int size);
 __global__ void swish_backward_kernel_ssm(__half* grad_input, __half* grad_output, __half* input, int size);
 __global__ void adamw_update_kernel_ssm(__half* weight, __half* grad, __half* m, __half* v, __half beta1, __half beta2, __half epsilon, __half learning_rate, __half weight_decay, __half alpha_t, int size, int total_samples);
-__global__ void compute_error_kernel_ssm(__half* error, __half* pred, __half* target, int size);
-__global__ void dot_product_kernel_ssm(__half* input, float* output, int size);
+__global__ void hgeam_kernel_ssm(__half* C, __half alpha, __half* A, __half beta, __half* B, int rows, int cols);
+__global__ void hdot_kernel_ssm(__half* x, float* result, int size);
 
 // Function prototypes
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size, cublasHandle_t cublas_handle);
