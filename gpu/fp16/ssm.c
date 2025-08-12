@@ -14,7 +14,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     // Initialize Lion parameters
     ssm->beta1 = 0.9f;      // Momentum coefficient
     ssm->beta2 = 0.99f;     // EMA coefficient for momentum update
-    ssm->weight_decay = 0.01f;
+    ssm->weight_decay = 0.05f;
     
     // Initialize cuBLAS
     ssm->cublas_handle = cublas_handle;
