@@ -54,7 +54,7 @@ int main() {
     
     // Training parameters
     const int num_epochs = 3000;
-    const float learning_rate = 0.0003f;
+    const float learning_rate = 0.0001f;
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {

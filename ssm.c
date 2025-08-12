@@ -11,11 +11,9 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->seq_len = seq_len;
     ssm->batch_size = batch_size;
     
-    // Initialize Adam parameters
-    ssm->beta1 = 0.9f;
-    ssm->beta2 = 0.999f;
-    ssm->epsilon = 1e-8f;
-    ssm->t = 0;
+    // Initialize Lion parameters
+    ssm->beta1 = 0.9f;      // Momentum coefficient
+    ssm->beta2 = 0.99f;     // EMA coefficient for momentum update
     ssm->weight_decay = 0.01f;
     
     // Allocate and initialize matrices and gradients
@@ -28,15 +26,11 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->C_grad = (float*)malloc(output_dim * state_dim * sizeof(float));
     ssm->D_grad = (float*)malloc(output_dim * input_dim * sizeof(float));
     
-    // Allocate Adam buffers
+    // Allocate Lion momentum buffers
     ssm->A_m = (float*)calloc(state_dim * state_dim, sizeof(float));
-    ssm->A_v = (float*)calloc(state_dim * state_dim, sizeof(float));
     ssm->B_m = (float*)calloc(state_dim * input_dim, sizeof(float));
-    ssm->B_v = (float*)calloc(state_dim * input_dim, sizeof(float));
     ssm->C_m = (float*)calloc(output_dim * state_dim, sizeof(float));
-    ssm->C_v = (float*)calloc(output_dim * state_dim, sizeof(float));
     ssm->D_m = (float*)calloc(output_dim * input_dim, sizeof(float));
-    ssm->D_v = (float*)calloc(output_dim * input_dim, sizeof(float));
     
     // Allocate layer outputs and working buffers
     ssm->layer1_preact = (float*)malloc(seq_len * batch_size * state_dim * sizeof(float));
@@ -74,10 +68,7 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
 void free_ssm(SSM* ssm) {
     free(ssm->A); free(ssm->B); free(ssm->C); free(ssm->D);
     free(ssm->A_grad); free(ssm->B_grad); free(ssm->C_grad); free(ssm->D_grad);
-    free(ssm->A_m); free(ssm->A_v);
-    free(ssm->B_m); free(ssm->B_v);
-    free(ssm->C_m); free(ssm->C_v);
-    free(ssm->D_m); free(ssm->D_v);
+    free(ssm->A_m); free(ssm->B_m); free(ssm->C_m); free(ssm->D_m);
     free(ssm->layer1_preact); free(ssm->layer1_output); free(ssm->layer2_output);
     free(ssm->error_output); free(ssm->error_hidden);
     free(ssm);
@@ -217,70 +208,49 @@ void backward_pass_ssm(SSM* ssm, float* X_t, int timestep) {
     }
 }
 
-// Update weights using AdamW
+// Update weights using Lion
 void update_weights_ssm(SSM* ssm, float learning_rate) {
-    ssm->t++;  // Increment time step
-    
-    float beta1_t = powf(ssm->beta1, ssm->t);
-    float beta2_t = powf(ssm->beta2, ssm->t);
-    float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
-    
     int total_samples = ssm->seq_len * ssm->batch_size;
     
     // Update A weights
     for (int i = 0; i < ssm->state_dim * ssm->state_dim; i++) {
         float grad = ssm->A_grad[i] / total_samples;
         
-        // m = β₁m + (1-β₁)(∂L/∂A)
-        ssm->A_m[i] = ssm->beta1 * ssm->A_m[i] + (1.0f - ssm->beta1) * grad;
-        // v = β₂v + (1-β₂)(∂L/∂A)²
-        ssm->A_v[i] = ssm->beta2 * ssm->A_v[i] + (1.0f - ssm->beta2) * grad * grad;
+        // c_t = β₁ * m_{t-1} + (1 - β₁) * g_t
+        float c = ssm->beta1 * ssm->A_m[i] + (1.0f - ssm->beta1) * grad;
         
-        float update = alpha_t * ssm->A_m[i] / (sqrtf(ssm->A_v[i]) + ssm->epsilon);
-        // A = (1-λη)A - η·(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
-        ssm->A[i] = ssm->A[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
+        // Apply weight decay and update: w_t = w_{t-1} - η * (λ * w_{t-1} + sign(c_t))
+        ssm->A[i] = ssm->A[i] - learning_rate * (ssm->weight_decay * ssm->A[i] + (c > 0.0f ? 1.0f : -1.0f));
+        
+        // Update momentum: m_t = β₂ * m_{t-1} + (1 - β₂) * g_t
+        ssm->A_m[i] = ssm->beta2 * ssm->A_m[i] + (1.0f - ssm->beta2) * grad;
     }
     
     // Update B weights
     for (int i = 0; i < ssm->state_dim * ssm->input_dim; i++) {
         float grad = ssm->B_grad[i] / total_samples;
         
-        // m = β₁m + (1-β₁)(∂L/∂B)
-        ssm->B_m[i] = ssm->beta1 * ssm->B_m[i] + (1.0f - ssm->beta1) * grad;
-        // v = β₂v + (1-β₂)(∂L/∂B)²
-        ssm->B_v[i] = ssm->beta2 * ssm->B_v[i] + (1.0f - ssm->beta2) * grad * grad;
-        
-        float update = alpha_t * ssm->B_m[i] / (sqrtf(ssm->B_v[i]) + ssm->epsilon);
-        // B = (1-λη)B - η·(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
-        ssm->B[i] = ssm->B[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
+        float c = ssm->beta1 * ssm->B_m[i] + (1.0f - ssm->beta1) * grad;
+        ssm->B[i] = ssm->B[i] - learning_rate * (ssm->weight_decay * ssm->B[i] + (c > 0.0f ? 1.0f : -1.0f));
+        ssm->B_m[i] = ssm->beta2 * ssm->B_m[i] + (1.0f - ssm->beta2) * grad;
     }
     
     // Update C weights
     for (int i = 0; i < ssm->output_dim * ssm->state_dim; i++) {
         float grad = ssm->C_grad[i] / total_samples;
         
-        // m = β₁m + (1-β₁)(∂L/∂C)
-        ssm->C_m[i] = ssm->beta1 * ssm->C_m[i] + (1.0f - ssm->beta1) * grad;
-        // v = β₂v + (1-β₂)(∂L/∂C)²
-        ssm->C_v[i] = ssm->beta2 * ssm->C_v[i] + (1.0f - ssm->beta2) * grad * grad;
-        
-        float update = alpha_t * ssm->C_m[i] / (sqrtf(ssm->C_v[i]) + ssm->epsilon);
-        // C = (1-λη)C - η·(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
-        ssm->C[i] = ssm->C[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
+        float c = ssm->beta1 * ssm->C_m[i] + (1.0f - ssm->beta1) * grad;
+        ssm->C[i] = ssm->C[i] - learning_rate * (ssm->weight_decay * ssm->C[i] + (c > 0.0f ? 1.0f : -1.0f));
+        ssm->C_m[i] = ssm->beta2 * ssm->C_m[i] + (1.0f - ssm->beta2) * grad;
     }
     
     // Update D weights
     for (int i = 0; i < ssm->output_dim * ssm->input_dim; i++) {
         float grad = ssm->D_grad[i] / total_samples;
         
-        // m = β₁m + (1-β₁)(∂L/∂D)
-        ssm->D_m[i] = ssm->beta1 * ssm->D_m[i] + (1.0f - ssm->beta1) * grad;
-        // v = β₂v + (1-β₂)(∂L/∂D)²
-        ssm->D_v[i] = ssm->beta2 * ssm->D_v[i] + (1.0f - ssm->beta2) * grad * grad;
-        
-        float update = alpha_t * ssm->D_m[i] / (sqrtf(ssm->D_v[i]) + ssm->epsilon);
-        // D = (1-λη)D - η·(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
-        ssm->D[i] = ssm->D[i] * (1.0f - learning_rate * ssm->weight_decay) - update;
+        float c = ssm->beta1 * ssm->D_m[i] + (1.0f - ssm->beta1) * grad;
+        ssm->D[i] = ssm->D[i] - learning_rate * (ssm->weight_decay * ssm->D[i] + (c > 0.0f ? 1.0f : -1.0f));
+        ssm->D_m[i] = ssm->beta2 * ssm->D_m[i] + (1.0f - ssm->beta2) * grad;
     }
 }
 
@@ -305,16 +275,11 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(ssm->C, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(ssm->D, sizeof(float), ssm->output_dim * ssm->input_dim, file);
     
-    // Save Adam state
-    fwrite(&ssm->t, sizeof(int), 1, file);
+    // Save Lion momentum state
     fwrite(ssm->A_m, sizeof(float), ssm->state_dim * ssm->state_dim, file);
-    fwrite(ssm->A_v, sizeof(float), ssm->state_dim * ssm->state_dim, file);
     fwrite(ssm->B_m, sizeof(float), ssm->state_dim * ssm->input_dim, file);
-    fwrite(ssm->B_v, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(ssm->C_m, sizeof(float), ssm->output_dim * ssm->state_dim, file);
-    fwrite(ssm->C_v, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(ssm->D_m, sizeof(float), ssm->output_dim * ssm->input_dim, file);
-    fwrite(ssm->D_v, sizeof(float), ssm->output_dim * ssm->input_dim, file);
 
     fclose(file);
     printf("Model saved to %s\n", filename);
@@ -348,16 +313,11 @@ SSM* load_ssm(const char* filename, int custom_batch_size) {
     fread(ssm->C, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D, sizeof(float), output_dim * input_dim, file);
     
-    // Load Adam state
-    fread(&ssm->t, sizeof(int), 1, file);
+    // Load Lion momentum state
     fread(ssm->A_m, sizeof(float), state_dim * state_dim, file);
-    fread(ssm->A_v, sizeof(float), state_dim * state_dim, file);
     fread(ssm->B_m, sizeof(float), state_dim * input_dim, file);
-    fread(ssm->B_v, sizeof(float), state_dim * input_dim, file);
     fread(ssm->C_m, sizeof(float), output_dim * state_dim, file);
-    fread(ssm->C_v, sizeof(float), output_dim * state_dim, file);
     fread(ssm->D_m, sizeof(float), output_dim * input_dim, file);
-    fread(ssm->D_v, sizeof(float), output_dim * input_dim, file);
     
     fclose(file);
     printf("Model loaded from %s\n", filename);
