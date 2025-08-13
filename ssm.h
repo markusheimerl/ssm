@@ -20,20 +20,14 @@ typedef struct {
     float* C_grad;      // output_dim x state_dim
     float* D_grad;      // output_dim x input_dim
     
-    // Adam parameters
-    float* A_m;  // First moment for A
-    float* A_v;  // Second moment for A
-    float* B_m;  // First moment for B
-    float* B_v;  // Second moment for B
-    float* C_m;  // First moment for C
-    float* C_v;  // Second moment for C
-    float* D_m;  // First moment for D
-    float* D_v;  // Second moment for D
-    float beta1;   // Exponential decay rate for first moment
-    float beta2;   // Exponential decay rate for second moment
-    float epsilon; // Small constant for numerical stability
-    int t;         // Time step
-    float weight_decay; // Weight decay parameter for AdamW
+    // Lion parameters
+    float* A_m;        // Momentum for A
+    float* B_m;        // Momentum for B
+    float* C_m;        // Momentum for C
+    float* D_m;        // Momentum for D
+    float beta1;       // Momentum coefficient
+    float beta2;       // Weight decay coefficient
+    float weight_decay; // Weight decay parameter for Lion
     
     // Layer outputs and working buffers
     float* layer1_preact;   // seq_len x batch_size x state_dim

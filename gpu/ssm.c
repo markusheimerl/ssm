@@ -11,12 +11,10 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     ssm->seq_len = seq_len;
     ssm->batch_size = batch_size;
     
-    // Initialize Adam parameters
-    ssm->beta1 = 0.9f;
-    ssm->beta2 = 0.999f;
-    ssm->epsilon = 1e-8f;
-    ssm->t = 0;
-    ssm->weight_decay = 0.01f;
+    // Initialize Lion parameters
+    ssm->beta1 = 0.9f;      // Momentum coefficient
+    ssm->beta2 = 0.99f;     // EMA coefficient for momentum update
+    ssm->weight_decay = 0.05f;
     
     // Initialize cuBLAS
     ssm->cublas_handle = cublas_handle;
@@ -59,15 +57,11 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&ssm->d_C_grad, output_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_D_grad, output_dim * input_dim * sizeof(float)));
     
-    // Allocate device memory for Adam parameters
+    // Allocate device memory for Lion parameters
     CHECK_CUDA(cudaMalloc(&ssm->d_A_m, state_dim * state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_A_v, state_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_B_m, state_dim * input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_B_v, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_C_m, output_dim * state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_C_v, output_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ssm->d_D_m, output_dim * input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&ssm->d_D_v, output_dim * input_dim * sizeof(float)));
     
     // Allocate device memory for layer outputs and working buffers
     CHECK_CUDA(cudaMalloc(&ssm->d_layer1_preact, seq_len * batch_size * state_dim * sizeof(float)));
@@ -83,13 +77,9 @@ SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMemcpy(ssm->d_D, D, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     CHECK_CUDA(cudaMemset(ssm->d_A_m, 0, state_dim * state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(ssm->d_A_v, 0, state_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_B_m, 0, state_dim * input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(ssm->d_B_v, 0, state_dim * input_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_C_m, 0, output_dim * state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(ssm->d_C_v, 0, output_dim * state_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(ssm->d_D_m, 0, output_dim * input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(ssm->d_D_v, 0, output_dim * input_dim * sizeof(float)));
     
     // Free local host memory
     free(A); free(B); free(C); free(D);
@@ -102,10 +92,7 @@ void free_ssm(SSM* ssm) {
     // Free device memory
     cudaFree(ssm->d_A); cudaFree(ssm->d_B); cudaFree(ssm->d_C); cudaFree(ssm->d_D);
     cudaFree(ssm->d_A_grad); cudaFree(ssm->d_B_grad); cudaFree(ssm->d_C_grad); cudaFree(ssm->d_D_grad);
-    cudaFree(ssm->d_A_m); cudaFree(ssm->d_A_v);
-    cudaFree(ssm->d_B_m); cudaFree(ssm->d_B_v);
-    cudaFree(ssm->d_C_m); cudaFree(ssm->d_C_v);
-    cudaFree(ssm->d_D_m); cudaFree(ssm->d_D_v);
+    cudaFree(ssm->d_A_m); cudaFree(ssm->d_B_m); cudaFree(ssm->d_C_m); cudaFree(ssm->d_D_m);
     cudaFree(ssm->d_layer1_preact); cudaFree(ssm->d_layer1_output); cudaFree(ssm->d_layer2_output);
     cudaFree(ssm->d_error_output); cudaFree(ssm->d_error_hidden);
     free(ssm);
@@ -286,70 +273,65 @@ void backward_pass_ssm(SSM* ssm, float* d_X_t, int timestep) {
     }
 }
 
-// CUDA kernel for AdamW update
-__global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v,
-                                        float beta1, float beta2, float epsilon, float learning_rate,
-                                        float weight_decay, float alpha_t, int size, int total_samples) {
+// CUDA kernel for Lion update
+__global__ void lion_update_kernel_ssm(float* weight, float* grad, float* m,
+                                       float beta1, float beta2, float learning_rate,
+                                       float weight_decay, int size, int total_samples) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        float g = grad[idx] / total_samples;
+        float g = grad[idx] / (float)total_samples;
         
-        // m = β₁m + (1-β₁)(∂L/∂W)
-        m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
-        // v = β₂v + (1-β₂)(∂L/∂W)²
-        v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
+        // c_t = β₁ * m_{t-1} + (1 - β₁) * g_t
+        float c = beta1 * m[idx] + (1.0f - beta1) * g;
         
-        float update = alpha_t * m[idx] / (sqrtf(v[idx]) + epsilon);
-        // W = (1-λη)W - η·(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
-        weight[idx] = weight[idx] * (1.0f - learning_rate * weight_decay) - update;
+        // Apply weight decay and update: w_t = w_{t-1} - η * (λ * w_{t-1} + sign(c_t))
+        float update = weight_decay * weight[idx] + (c > 0.0f ? 1.0f : -1.0f);
+        weight[idx] = weight[idx] - learning_rate * update;
+        
+        // Update momentum: m_t = β₂ * m_{t-1} + (1 - β₂) * g_t
+        m[idx] = beta2 * m[idx] + (1.0f - beta2) * g;
     }
 }
 
-// Update weights using AdamW
+// Update weights using Lion
 void update_weights_ssm(SSM* ssm, float learning_rate) {
-    ssm->t++;  // Increment time step
-    
-    float beta1_t = powf(ssm->beta1, ssm->t);
-    float beta2_t = powf(ssm->beta2, ssm->t);
-    float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
-    
     int total_samples = ssm->seq_len * ssm->batch_size;
     int block_size = 256;
     
     // Update A weights
     int A_size = ssm->state_dim * ssm->state_dim;
     int A_blocks = (A_size + block_size - 1) / block_size;
-    adamw_update_kernel_ssm<<<A_blocks, block_size>>>(
-        ssm->d_A, ssm->d_A_grad, ssm->d_A_m, ssm->d_A_v,
-        ssm->beta1, ssm->beta2, ssm->epsilon, learning_rate, ssm->weight_decay,
-        alpha_t, A_size, total_samples
+    lion_update_kernel_ssm<<<A_blocks, block_size>>>(
+        ssm->d_A, ssm->d_A_grad, ssm->d_A_m,
+        ssm->beta1, ssm->beta2, learning_rate, ssm->weight_decay,
+        A_size, total_samples
     );
     
     // Update B weights
     int B_size = ssm->state_dim * ssm->input_dim;
     int B_blocks = (B_size + block_size - 1) / block_size;
-    adamw_update_kernel_ssm<<<B_blocks, block_size>>>(
-        ssm->d_B, ssm->d_B_grad, ssm->d_B_m, ssm->d_B_v,
-        ssm->beta1, ssm->beta2, ssm->epsilon, learning_rate, ssm->weight_decay,
-        alpha_t, B_size, total_samples
+    lion_update_kernel_ssm<<<B_blocks, block_size>>>(
+        ssm->d_B, ssm->d_B_grad, ssm->d_B_m,
+        ssm->beta1, ssm->beta2, learning_rate, ssm->weight_decay,
+        B_size, total_samples
     );
     
     // Update C weights
     int C_size = ssm->output_dim * ssm->state_dim;
     int C_blocks = (C_size + block_size - 1) / block_size;
-    adamw_update_kernel_ssm<<<C_blocks, block_size>>>(
-        ssm->d_C, ssm->d_C_grad, ssm->d_C_m, ssm->d_C_v,
-        ssm->beta1, ssm->beta2, ssm->epsilon, learning_rate, ssm->weight_decay,
-        alpha_t, C_size, total_samples
+    lion_update_kernel_ssm<<<C_blocks, block_size>>>(
+        ssm->d_C, ssm->d_C_grad, ssm->d_C_m,
+        ssm->beta1, ssm->beta2, learning_rate, ssm->weight_decay,
+        C_size, total_samples
     );
     
     // Update D weights
     int D_size = ssm->output_dim * ssm->input_dim;
     int D_blocks = (D_size + block_size - 1) / block_size;
-    adamw_update_kernel_ssm<<<D_blocks, block_size>>>(
-        ssm->d_D, ssm->d_D_grad, ssm->d_D_m, ssm->d_D_v,
-        ssm->beta1, ssm->beta2, ssm->epsilon, learning_rate, ssm->weight_decay,
-        alpha_t, D_size, total_samples
+    lion_update_kernel_ssm<<<D_blocks, block_size>>>(
+        ssm->d_D, ssm->d_D_grad, ssm->d_D_m,
+        ssm->beta1, ssm->beta2, learning_rate, ssm->weight_decay,
+        D_size, total_samples
     );
 }
 
@@ -387,43 +369,25 @@ void save_ssm(SSM* ssm, const char* filename) {
     fwrite(C, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(D, sizeof(float), ssm->output_dim * ssm->input_dim, file);
     
-    // Save Adam state
-    fwrite(&ssm->t, sizeof(int), 1, file);
-    
-    // Also save Adam state variables
+    // Also save Lion momentum state variables
     float* A_m = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
-    float* A_v = (float*)malloc(ssm->state_dim * ssm->state_dim * sizeof(float));
     float* B_m = (float*)malloc(ssm->state_dim * ssm->input_dim * sizeof(float));
-    float* B_v = (float*)malloc(ssm->state_dim * ssm->input_dim * sizeof(float));
     float* C_m = (float*)malloc(ssm->output_dim * ssm->state_dim * sizeof(float));
-    float* C_v = (float*)malloc(ssm->output_dim * ssm->state_dim * sizeof(float));
     float* D_m = (float*)malloc(ssm->output_dim * ssm->input_dim * sizeof(float));
-    float* D_v = (float*)malloc(ssm->output_dim * ssm->input_dim * sizeof(float));
     
     CHECK_CUDA(cudaMemcpy(A_m, ssm->d_A_m, ssm->state_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(A_v, ssm->d_A_v, ssm->state_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(B_m, ssm->d_B_m, ssm->state_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(B_v, ssm->d_B_v, ssm->state_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(C_m, ssm->d_C_m, ssm->output_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(C_v, ssm->d_C_v, ssm->output_dim * ssm->state_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(D_m, ssm->d_D_m, ssm->output_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(D_v, ssm->d_D_v, ssm->output_dim * ssm->input_dim * sizeof(float), cudaMemcpyDeviceToHost));
     
     fwrite(A_m, sizeof(float), ssm->state_dim * ssm->state_dim, file);
-    fwrite(A_v, sizeof(float), ssm->state_dim * ssm->state_dim, file);
     fwrite(B_m, sizeof(float), ssm->state_dim * ssm->input_dim, file);
-    fwrite(B_v, sizeof(float), ssm->state_dim * ssm->input_dim, file);
     fwrite(C_m, sizeof(float), ssm->output_dim * ssm->state_dim, file);
-    fwrite(C_v, sizeof(float), ssm->output_dim * ssm->state_dim, file);
     fwrite(D_m, sizeof(float), ssm->output_dim * ssm->input_dim, file);
-    fwrite(D_v, sizeof(float), ssm->output_dim * ssm->input_dim, file);
     
     // Free temporary host memory
     free(A); free(B); free(C); free(D);
-    free(A_m); free(A_v);
-    free(B_m); free(B_v);
-    free(C_m); free(C_v);
-    free(D_m); free(D_v);
+    free(A_m); free(B_m); free(C_m); free(D_m);
 
     fclose(file);
     printf("Model saved to %s\n", filename);
@@ -462,7 +426,6 @@ SSM* load_ssm(const char* filename, int custom_batch_size, cublasHandle_t cublas
     fread(B, sizeof(float), state_dim * input_dim, file);
     fread(C, sizeof(float), output_dim * state_dim, file);
     fread(D, sizeof(float), output_dim * input_dim, file);
-    fread(&ssm->t, sizeof(int), 1, file);
     
     // Copy weights to device
     CHECK_CUDA(cudaMemcpy(ssm->d_A, A, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
@@ -470,41 +433,26 @@ SSM* load_ssm(const char* filename, int custom_batch_size, cublasHandle_t cublas
     CHECK_CUDA(cudaMemcpy(ssm->d_C, C, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_D, D, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     
-    // Load Adam state variables
+    // Load Lion momentum state variables
     float* A_m = (float*)malloc(state_dim * state_dim * sizeof(float));
-    float* A_v = (float*)malloc(state_dim * state_dim * sizeof(float));
     float* B_m = (float*)malloc(state_dim * input_dim * sizeof(float));
-    float* B_v = (float*)malloc(state_dim * input_dim * sizeof(float));
     float* C_m = (float*)malloc(output_dim * state_dim * sizeof(float));
-    float* C_v = (float*)malloc(output_dim * state_dim * sizeof(float));
     float* D_m = (float*)malloc(output_dim * input_dim * sizeof(float));
-    float* D_v = (float*)malloc(output_dim * input_dim * sizeof(float));
     
     fread(A_m, sizeof(float), state_dim * state_dim, file);
-    fread(A_v, sizeof(float), state_dim * state_dim, file);
     fread(B_m, sizeof(float), state_dim * input_dim, file);
-    fread(B_v, sizeof(float), state_dim * input_dim, file);
     fread(C_m, sizeof(float), output_dim * state_dim, file);
-    fread(C_v, sizeof(float), output_dim * state_dim, file);
     fread(D_m, sizeof(float), output_dim * input_dim, file);
-    fread(D_v, sizeof(float), output_dim * input_dim, file);
     
-    // Copy Adam state to device
+    // Copy Lion momentum state to device
     CHECK_CUDA(cudaMemcpy(ssm->d_A_m, A_m, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_A_v, A_v, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_B_m, B_m, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_B_v, B_v, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_C_m, C_m, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_C_v, C_v, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(ssm->d_D_m, D_m, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(ssm->d_D_v, D_v, output_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     // Free temporary host memory
     free(A); free(B); free(C); free(D);
-    free(A_m); free(A_v);
-    free(B_m); free(B_v);
-    free(C_m); free(C_v);
-    free(D_m); free(D_v);
+    free(A_m); free(B_m); free(C_m); free(D_m);
     
     fclose(file);
     printf("Model loaded from %s\n", filename);

@@ -45,20 +45,14 @@ typedef struct {
     float* d_C_grad;      // output_dim x state_dim
     float* d_D_grad;      // output_dim x input_dim
     
-    // Device pointers for Adam parameters
-    float* d_A_m;  // First moment for A
-    float* d_A_v;  // Second moment for A
-    float* d_B_m;  // First moment for B
-    float* d_B_v;  // Second moment for B
-    float* d_C_m;  // First moment for C
-    float* d_C_v;  // Second moment for C
-    float* d_D_m;  // First moment for D
-    float* d_D_v;  // Second moment for D
-    float beta1;   // Exponential decay rate for first moment
-    float beta2;   // Exponential decay rate for second moment
-    float epsilon; // Small constant for numerical stability
-    int t;         // Time step
-    float weight_decay; // Weight decay parameter for AdamW
+    // Device pointers for Lion parameters
+    float* d_A_m;         // Momentum for A
+    float* d_B_m;         // Momentum for B
+    float* d_C_m;         // Momentum for C
+    float* d_D_m;         // Momentum for D
+    float beta1;          // Momentum coefficient
+    float beta2;          // EMA coefficient for momentum update
+    float weight_decay;   // Weight decay parameter for Lion
     
     // Device pointers for layer outputs and working buffers
     float* d_layer1_preact;   // seq_len x batch_size x state_dim
@@ -81,7 +75,7 @@ typedef struct {
 // CUDA kernel prototypes
 __global__ void swish_forward_kernel_ssm(float* output, float* input, int size);
 __global__ void swish_backward_kernel_ssm(float* grad_input, float* grad_output, float* input, int size);
-__global__ void adamw_update_kernel_ssm(float* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int total_samples);
+__global__ void lion_update_kernel_ssm(float* weight, float* grad, float* m, float beta1, float beta2, float learning_rate, float weight_decay, int size, int total_samples);
 
 // Function prototypes
 SSM* init_ssm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size, cublasHandle_t cublas_handle);

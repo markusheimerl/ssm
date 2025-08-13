@@ -25,13 +25,13 @@ $$
 \end{align*}
 $$
 
-The AdamW optimizer maintains exponential moving averages of gradients and their squares through $\beta_1$ and $\beta_2$, while simultaneously applying L2 regularization through weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each weight matrix $W$, the update rule is:
+The Lion optimizer maintains exponential moving averages of gradients through $\beta_1$ and $\beta_2$, while simultaneously applying L2 regularization through weight decay $\lambda$. The learning rate is denoted by $\eta$ and $t$ is the current training iteration. For each weight matrix $W$, the update rule is:
 
 $$
 \begin{align*}
-m &= \beta_1m + (1-\beta_1)(\frac{\partial L}{\partial W}) \\
-v &= \beta_2v + (1-\beta_2)(\frac{\partial L}{\partial W})^2 \\
-W &= (1-\lambda\eta)W - \eta\cdot\frac{m}{1-\beta_1^t}/\sqrt{\frac{v}{1-\beta_2^t} + \epsilon}
+c_t &= \beta_1 m_{t-1} + (1-\beta_1)g_t \\
+w_t &= w_{t-1} - \eta(\lambda w_{t-1} + \text{sign}(c_t)) \\
+m_t &= \beta_2 m_{t-1} + (1-\beta_2)g_t
 \end{align*}
 $$
 
